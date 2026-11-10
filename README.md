@@ -7,7 +7,7 @@ Een gedeelde boodschappenlijst voor het gezin. Iedereen heeft een eigen account,
 - **Historiek:** elke afgesloten week, en met + zet je een product terug op de lijst.
 - **Statistieken:** wat je het meest koopt, per winkel en per persoon.
 
-Gebouwd als statische website (HTML, CSS en JavaScript, zonder build-stap) op **Netlify**, met **Supabase** voor de logins en de database (Postgres).
+Gebouwd als statische website (HTML, CSS en JavaScript, zonder build-stap) op **GitHub Pages**, met **Supabase** voor de logins en de database (Postgres).
 
 ## Eenmalige installatie
 
@@ -16,21 +16,15 @@ Gebouwd als statische website (HTML, CSS en JavaScript, zonder build-stap) op **
 1. Maak een gratis project op [supabase.com](https://supabase.com), met als regio Frankfurt of Ireland.
 2. Open **SQL Editor → New query**, plak de inhoud van [`supabase/schema.sql`](supabase/schema.sql) en klik op **Run**.
 3. Bij **Authentication → Sign In / Providers → Email** kun je **Confirm email** uitzetten. Dan hoeven gezinsleden geen bevestigingsmail te openen. Laat je het aan, dan moeten ze eerst op de link in die mail klikken.
-4. Ga naar **Authentication → URL Configuration** en vul je Netlify-adres in als **Site URL**, bijvoorbeeld `https://meerstraat-shopping.netlify.app`.
+4. Ga naar **Authentication → URL Configuration** en vul je GitHub Pages-adres in als **Site URL**, bijvoorbeeld `https://deroovermaarten-spec.github.io/meerstraat-shopping/`.
 5. Kopieer bij **Project Settings → API** de **Project URL** en de **anon public key** naar [`config.js`](config.js).
 
 De anon key mag publiek zijn. De regels in de database zorgen ervoor dat alleen leden van een gezin de gegevens van dat gezin kunnen zien of aanpassen.
 
-### 2. Website (Netlify)
+### 2. Website (GitHub Pages)
 
-De repo is privé, daarom staat de site op Netlify (gratis) in plaats van GitHub Pages.
-
-1. Maak een account op [netlify.com](https://www.netlify.com) en kies **Add new site → Import an existing project → GitHub**.
-2. Geef Netlify toegang tot de repo `meerstraat-shopping`.
-3. Laat **Build command** leeg en zet **Publish directory** op `.` (dat staat ook al in [`netlify.toml`](netlify.toml)).
-4. Klik op **Deploy**. Bij **Site configuration → Change site name** kies je bijvoorbeeld `meerstraat-shopping`.
-
-Elke push naar `main` zet de nieuwe versie automatisch online.
+1. Ga in de repo naar **Settings → Pages** en kies bij **Source** voor **GitHub Actions**.
+2. Elke push naar `main` publiceert de site automatisch via [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
 
 ### 3. Gezin aanmaken
 
