@@ -70,7 +70,36 @@ function must({ data, error }) { if (error) throw error; return data; }
 /* Database rows → the shape the views use */
 const ms = t => (t ? new Date(t).getTime() : 0);
 const toItem = r => ({ id: r.id, name: r.name, qty: r.qty, cat: r.cat, shops: r.shops || [], done: r.done, doneShop: r.done_shop, by: r.added_by, doneBy: r.done_by, at: ms(r.created_at), doneAt: ms(r.done_at), week: r.week_id });
-const toStaple = r => ({ id: r.id, name: r.name, cat: r.cat, shops: r.shops || [] });
+const toStaple = r => ({ id: r.id, name: r.name, cat: r.cat, shops: r.shops || [], description: r.description || "", photo: r.photo_path || "" });
+
+/* Product photos: private storage, shown through signed links that last a day. */
+const PHOTO_BUCKET = "product-photos";
+const photoUrls = {};
+async function refreshPhotoUrls() {
+  const need = [...new Set(staples.map(s => s.photo).filter(p => p && !photoUrls[p]))];
+  if (!need.length) return;
+  const { data } = await sb.storage.from(PHOTO_BUCKET).createSignedUrls(need, 60 * 60 * 24);
+  (data || []).forEach(x => { if (x.signedUrl) photoUrls[x.path] = x.signedUrl; });
+  render();
+}
+function photoOf(name) { const s = stapleByName(name); return s && s.photo ? photoUrls[s.photo] || "" : ""; }
+function thumb(url, cls) { const i = el("img", cls || "thumb"); i.src = url; i.alt = ""; i.loading = "lazy"; return i; }
+/* Shrink a camera photo to at most 900px before upload so it stays small and fast. */
+async function shrinkImage(file) {
+  const img = await createImageBitmap(file).catch(() => null);
+  if (!img) return file;
+  const scale = Math.min(1, 900 / Math.max(img.width, img.height));
+  const c = document.createElement("canvas"); c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return await new Promise(res => c.toBlob(b => res(b || file), "image/jpeg", 0.82));
+}
+async function uploadPhoto(blob) {
+  const path = household.id + "/" + crypto.randomUUID() + ".jpg";
+  must(await sb.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: "image/jpeg", upsert: false }));
+  photoUrls[path] = URL.createObjectURL(blob);
+  return path;
+}
+async function deletePhoto(path) { if (path) await sb.storage.from(PHOTO_BUCKET).remove([path]); }
 
 async function loadAll() {
   const h = household.id;
@@ -82,6 +111,7 @@ async function loadAll() {
     sb.from("items").select("*").eq("household_id", h).order("created_at").limit(5000),
   ]);
   household = must(hh); members = must(mem); staples = must(st).map(toStaple); items = must(it).map(toItem);
+  refreshPhotoUrls().catch(() => {});
   weeks = {}; must(wk).forEach(w => { weeks[w.id] = { startedAt: ms(w.started_at), closedAt: ms(w.closed_at) }; });
   current = household.current_week ? { week: household.current_week, startedAt: (weeks[household.current_week] || {}).startedAt } : null;
   members.forEach(m => { names[m.user_id] = m.display_name; });
@@ -144,11 +174,12 @@ async function addStaple(name, cat, shops) {
 }
 async function updateStaple(id, patch) {
   const s = staples.find(x => x.id === id); if (s) Object.assign(s, patch);
-  must(await sb.from("staples").update(patch).eq("id", id));
+  const row = { ...patch }; if ("photo" in row) { row.photo_path = row.photo || null; delete row.photo; }
+  must(await sb.from("staples").update(row).eq("id", id));
 }
 async function removeStaple(s) {
   staples = staples.filter(x => x.id !== s.id); render();
-  try { must(await sb.from("staples").delete().eq("id", s.id)); } catch (e) { writeFailed(e); scheduleReload(); }
+  try { must(await sb.from("staples").delete().eq("id", s.id)); deletePhoto(s.photo).catch(() => {}); } catch (e) { writeFailed(e); scheduleReload(); }
 }
 async function finishWeek() {
   try { must(await sb.rpc("finish_week", { h: household.id })); await loadAll(); } catch (e) { writeFailed(e); }
@@ -185,6 +216,25 @@ function editorFor(kind, obj) {
   } else box.appendChild(field("Naam", nameIn));
   box.appendChild(field("Waar te koop", shopPicker(d.shops), true));
   box.appendChild(field("Afdeling", aisleSelect("ed-cat", d.cat, v => { d.cat = v; })));
+  if (kind === "staple") {
+    const desc = el("textarea", "txt"); desc.id = "ed-desc"; desc.rows = 2; desc.maxLength = 300; desc.value = d.description;
+    desc.placeholder = "bv. halfvolle, groene dop · merk Boni · 1 liter";
+    desc.addEventListener("input", () => { d.description = desc.value; });
+    box.appendChild(field("Beschrijving (optioneel)", desc));
+    const ph = el("div", "photo-edit");
+    const shown = d.previewUrl || (!d.removePhoto && d.photo ? photoUrls[d.photo] : "");
+    if (shown) ph.appendChild(thumb(shown, "photo-big"));
+    const file = el("input"); file.type = "file"; file.accept = "image/*"; file.id = "ed-photo"; file.hidden = true;
+    file.addEventListener("change", async () => {
+      const f = file.files && file.files[0]; if (!f) return;
+      d.newBlob = await shrinkImage(f); d.previewUrl = URL.createObjectURL(d.newBlob); d.removePhoto = false; render();
+    });
+    const pick = btn("btn", shown ? "Andere foto" : "Foto toevoegen", () => file.click());
+    const btns = el("div", "acts"); btns.style.justifyContent = "flex-start"; btns.append(pick);
+    if (shown) btns.appendChild(btn("btn ghost-danger", "Foto verwijderen", () => { d.newBlob = null; d.previewUrl = ""; d.removePhoto = true; render(); }));
+    ph.append(file, btns);
+    box.appendChild(field("Foto (optioneel)", ph, true));
+  }
   if (kind === "item") {
     const t = el("label", "toggle"); const cb = el("input"); cb.type = "checkbox"; cb.id = "ed-staple"; cb.checked = d.staple;
     cb.addEventListener("change", () => { d.staple = cb.checked; });
@@ -204,7 +254,12 @@ function editorFor(kind, obj) {
         else if (d.staple && st) await updateStaple(st.id, { name, shops: d.shops, cat: d.cat });
         else if (!d.staple && st) await removeStaple(st);
       } else {
-        await updateStaple(obj.id, { name, shops: d.shops, cat: d.cat });
+        const patch = { name, shops: d.shops, cat: d.cat, description: d.description.trim() };
+        const oldPhoto = obj.photo;
+        if (d.newBlob) patch.photo = await uploadPhoto(d.newBlob);
+        else if (d.removePhoto) patch.photo = "";
+        await updateStaple(obj.id, patch);
+        if ((d.newBlob || d.removePhoto) && oldPhoto) deletePhoto(oldPhoto).catch(() => {});
         for (const it of thisWeek().filter(i => !i.done && key(i.name) === oldKey)) await updateItem(it.id, { name, shops: d.shops, cat: d.cat });
       }
     } catch (err) { writeFailed(err); }
@@ -215,7 +270,7 @@ function editorFor(kind, obj) {
 }
 function openEditor(kind, obj) {
   if (editing && editing.id === obj.id) { editing = null; render(); return; }
-  editing = { kind, id: obj.id, draft: { name: obj.name, qty: obj.qty || "", shops: [...shopsOf(obj)], cat: obj.cat || "other", staple: !!stapleByName(obj.name) } };
+  editing = { kind, id: obj.id, draft: { name: obj.name, qty: obj.qty || "", shops: [...shopsOf(obj)], cat: obj.cat || "other", staple: !!stapleByName(obj.name), description: obj.description || "", photo: obj.photo || "", newBlob: null, previewUrl: "", removePhoto: false } };
   render();
 }
 
@@ -225,7 +280,9 @@ function itemRow(it) {
   const b = btn("check", null, () => toggle(it)); b.disabled = !writable();
   b.setAttribute("aria-pressed", it.done ? "true" : "false");
   b.innerHTML = '<span class="box">' + CHECK + '</span>';
+  const pu = photoOf(it.name); if (pu) b.appendChild(thumb(pu));
   const lab = el("span", "label"); lab.appendChild(el("span", "name", it.name));
+  const st0 = stapleByName(it.name); if (st0 && st0.description && !it.done) lab.appendChild(el("span", "desc", st0.description));
   const meta = el("span", "meta");
   if (stapleByName(it.name)) meta.appendChild(el("span", "fav", "★"));
   meta.appendChild(shopTags(it.done && it.doneShop ? [it.doneShop] : shopsOf(it)));
@@ -249,7 +306,9 @@ function stapleRow(s) {
   const b = btn("check", null, () => { if (!onList) addItem({ name: s.name, cat: s.cat, shops: shopsOf(s) }); else if (!onList.done) removeItem(onList); });
   b.disabled = !writable(); b.setAttribute("aria-pressed", onList ? "true" : "false");
   b.innerHTML = '<span class="box">' + CHECK + '</span>';
+  if (s.photo && photoUrls[s.photo]) b.appendChild(thumb(photoUrls[s.photo]));
   const lab = el("span", "label"); lab.appendChild(el("span", "name", s.name));
+  if (s.description) lab.appendChild(el("span", "desc", s.description));
   const meta = el("span", "meta"); meta.appendChild(shopTags(shopsOf(s)));
   meta.appendChild(el("span", null, onList ? (onList.done ? "In de mand" : "Op de lijst") : AISLE_NAME[s.cat] || "Overige"));
   lab.appendChild(meta); b.appendChild(lab);
@@ -415,7 +474,7 @@ function viewStaples(v) {
     const sec = el("section", "section");
     const h = el("h2", null, "Jouw vaste items"); h.appendChild(el("span", null, onCount + " van " + staples.length + " op de lijst"));
     sec.appendChild(h);
-    sec.appendChild(el("p", "hint", "Vink aan om op de lijst van deze week te zetten. Met ⋯ pas je naam, winkels en afdeling aan."));
+    sec.appendChild(el("p", "hint", "Vink aan om op de lijst van deze week te zetten. Met ⋯ pas je naam, winkels, afdeling, beschrijving en foto aan."));
     const ul = el("ul", "rows");
     AISLES.forEach(([k]) => staples.filter(s => (AISLE_NAME[s.cat] ? s.cat : "other") === k).sort((a, b) => a.name.localeCompare(b.name)).forEach(s => ul.appendChild(stapleRow(s))));
     sec.appendChild(ul); v.appendChild(sec);

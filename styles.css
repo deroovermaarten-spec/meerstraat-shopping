@@ -177,3 +177,10 @@ body { margin: 0; }
 .card .btn.primary { align-self: flex-start; }
 .whocell { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: .88rem; }
 .code { font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .08em; user-select: all; }
+
+/* Product photos and descriptions */
+.thumb { flex: none; width: 40px; height: 40px; border-radius: 8px; object-fit: cover; background: var(--accent-soft); }
+.photo-big { width: 120px; height: 120px; border-radius: 12px; object-fit: cover; border: 1px solid var(--line); }
+.photo-edit { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.desc { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
+textarea.txt { font: inherit; font-size: 16px; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; width: 100%; resize: vertical; }
