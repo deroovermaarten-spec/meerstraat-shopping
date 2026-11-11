@@ -45,8 +45,10 @@ function boughtShop(i) { if (i.doneShop) return i.doneShop; const a = shopsOf(i)
 /* State */
 let session = null, me = null, household = null, members = [], canWrite = true;
 let items = [], staples = [], weeks = {}, current = null, loaded = false;
-let tab = store("tab") || "list"; if (!["list", "staples", "history", "stats"].includes(tab)) tab = "list";
+let gifts = [], claims = {}, giftsReady = true; // claims: gift id → user id (never includes your own wishes)
+let tab = store("tab") || "list"; if (!["list", "staples", "gifts", "history", "stats"].includes(tab)) tab = "list";
 let shopFilter = store("shop") || "all"; if (shopFilter !== "all" && !SHOP_NAME[shopFilter]) shopFilter = "all";
+let giftFor = store("giftFor") || "", giftQ = "";
 let omniQ = "", staplesQ = "", editing = null, confirmFinish = false, whoOpen = false, showAllQuick = false;
 let screen = "loading"; // loading | auth | onboard | app
 const names = {};
@@ -111,12 +113,48 @@ async function loadAll() {
     sb.from("items").select("*").eq("household_id", h).order("created_at").limit(5000),
   ]);
   household = must(hh); members = must(mem); staples = must(st).map(toStaple); items = must(it).map(toItem);
+  await loadGifts();
   refreshPhotoUrls().catch(() => {});
   weeks = {}; must(wk).forEach(w => { weeks[w.id] = { startedAt: ms(w.started_at), closedAt: ms(w.closed_at) }; });
   current = household.current_week ? { week: household.current_week, startedAt: (weeks[household.current_week] || {}).startedAt } : null;
   members.forEach(m => { names[m.user_id] = m.display_name; });
   loaded = true;
 }
+/* Gift wishlists: optional, so the rest of the app keeps working if 003_gifts.sql is not run yet. */
+const toGift = r => ({ id: r.id, owner: r.owner_id, title: r.title, note: r.note || "", link: r.link || "", price: r.price || "", fav: !!r.favourite, at: ms(r.created_at) });
+async function loadGifts() {
+  const h = household.id;
+  const [g, c] = await Promise.all([
+    sb.from("gifts").select("*").eq("household_id", h).order("created_at"),
+    sb.from("gift_claims").select("gift_id, claimed_by").eq("household_id", h),
+  ]);
+  if (g.error || c.error) { giftsReady = false; gifts = []; claims = {}; return; }
+  giftsReady = true; gifts = g.data.map(toGift);
+  claims = {}; c.data.forEach(x => { claims[x.gift_id] = x.claimed_by; });
+}
+async function addGift(title) {
+  try { const r = must(await sb.from("gifts").insert({ household_id: household.id, owner_id: me, title }).select().single()); gifts.push(toGift(r)); render(); } catch (e) { writeFailed(e); }
+}
+async function updateGift(id, patch) {
+  const g = gifts.find(x => x.id === id); if (g) Object.assign(g, patch);
+  const row = { ...patch }; if ("fav" in row) { row.favourite = row.fav; delete row.fav; }
+  must(await sb.from("gifts").update(row).eq("id", id));
+}
+async function removeGift(g) {
+  gifts = gifts.filter(x => x.id !== g.id); render();
+  try { must(await sb.from("gifts").delete().eq("id", g.id)); } catch (e) { writeFailed(e); scheduleReload(); }
+}
+async function claimGift(g) {
+  const was = claims[g.id];
+  if (was && was !== me) return;
+  if (was) delete claims[g.id]; else claims[g.id] = me;
+  render();
+  try {
+    if (was) must(await sb.from("gift_claims").delete().eq("gift_id", g.id));
+    else must(await sb.from("gift_claims").insert({ gift_id: g.id, household_id: household.id, claimed_by: me }));
+  } catch (e) { writeFailed(e); scheduleReload(); }
+}
+
 let reloadTimer = null;
 function scheduleReload() { clearTimeout(reloadTimer); reloadTimer = setTimeout(async () => { try { await loadAll(); render(); } catch (e) { writeFailed(e); } }, 250); }
 let channel = null;
@@ -127,6 +165,8 @@ function subscribe() {
     .on("postgres_changes", { event: "*", schema: "public", table: "items", filter: f }, scheduleReload)
     .on("postgres_changes", { event: "*", schema: "public", table: "staples", filter: f }, scheduleReload)
     .on("postgres_changes", { event: "*", schema: "public", table: "members", filter: f }, scheduleReload)
+    .on("postgres_changes", { event: "*", schema: "public", table: "gifts", filter: f }, scheduleReload)
+    .on("postgres_changes", { event: "*", schema: "public", table: "gift_claims", filter: f }, scheduleReload)
     .on("postgres_changes", { event: "*", schema: "public", table: "households", filter: "id=eq." + household.id }, scheduleReload)
     .subscribe();
 }
@@ -523,6 +563,107 @@ function viewHistory(v) {
   });
 }
 
+/* Cadeaus: one wishlist per family member. You fill in your own; the others can say "ik koop dit". */
+function safeLink(u) {
+  const t = String(u || "").trim(); if (!t) return "";
+  const full = /^https?:\/\//i.test(t) ? t : "https://" + t;
+  try { const x = new URL(full); return x.protocol === "http:" || x.protocol === "https:" ? x.href : ""; } catch (_) { return ""; }
+}
+function linkHost(u) { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (_) { return "link"; } }
+function giftEditor(g) {
+  if (!editing || editing.kind !== "gift" || editing.id !== g.id) return null;
+  const d = editing.draft, box = el("div", "editor");
+  const t = el("input", "txt"); t.id = "ed-gtitle"; t.value = d.title; t.maxLength = 120; t.addEventListener("input", () => { d.title = t.value; });
+  const pr = el("input", "txt"); pr.id = "ed-gprice"; pr.value = d.price; pr.maxLength = 30; pr.placeholder = "bv. € 25"; pr.addEventListener("input", () => { d.price = pr.value; });
+  const two = el("div", "two"); two.append(field("Wat", t), field("Prijs (ongeveer)", pr)); box.appendChild(two);
+  const ln = el("input", "txt"); ln.id = "ed-glink"; ln.type = "url"; ln.inputMode = "url"; ln.value = d.link; ln.maxLength = 1000; ln.placeholder = "https://…"; ln.addEventListener("input", () => { d.link = ln.value; });
+  box.appendChild(field("Link naar de winkel (optioneel)", ln));
+  const n = el("textarea", "txt"); n.id = "ed-gnote"; n.rows = 2; n.maxLength = 500; n.value = d.note; n.placeholder = "bv. maat M, in het blauw, mag ook tweedehands";
+  n.addEventListener("input", () => { d.note = n.value; });
+  box.appendChild(field("Uitleg (optioneel)", n));
+  const tg = el("label", "toggle"); const cb = el("input"); cb.type = "checkbox"; cb.id = "ed-gfav"; cb.checked = d.fav;
+  cb.addEventListener("change", () => { d.fav = cb.checked; }); tg.append(cb, el("span", null, "Heel graag ♥")); box.appendChild(tg);
+  const acts = el("div", "acts"), right = el("div", "acts");
+  right.append(btn("btn", "Annuleren", () => { editing = null; render(); }), btn("btn primary", "Bewaren", async e => {
+    e.currentTarget.disabled = true;
+    try { await updateGift(g.id, { title: d.title.trim() || g.title, price: d.price.trim(), link: d.link.trim() ? safeLink(d.link) || d.link.trim() : "", note: d.note.trim(), fav: d.fav }); } catch (err) { writeFailed(err); }
+    editing = null; render();
+  }));
+  acts.append(btn("btn ghost-danger", "Verwijderen", async () => { editing = null; await removeGift(g); }), right);
+  box.appendChild(acts);
+  return box;
+}
+function giftRow(g, mine) {
+  const by = claims[g.id], li = el("li", "gift" + (!mine && by ? " claimed" : ""));
+  const main = el("div", "row-main");
+  const lab = el("div", "label");
+  const nm = el("span", "name", g.title); if (g.fav) nm.prepend(el("span", "heart", "♥ ")); lab.appendChild(nm);
+  if (g.note) lab.appendChild(el("span", "desc", g.note));
+  const meta = el("span", "meta");
+  if (g.price) meta.appendChild(el("span", "price", g.price));
+  const href = safeLink(g.link);
+  if (href) { const a = el("a", "glink", linkHost(href) + " ↗"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; meta.appendChild(a); }
+  if (!mine && by) meta.appendChild(el("span", "who-buys", by === me ? "Jij koopt dit" : "Wordt gekocht door " + (person(by) || "iemand")));
+  if (meta.childNodes.length) lab.appendChild(meta);
+  main.appendChild(lab);
+  if (mine) {
+    const more = btn("more", "⋯", () => {
+      if (editing && editing.id === g.id) { editing = null; render(); return; }
+      editing = { kind: "gift", id: g.id, draft: { title: g.title, price: g.price, link: g.link, note: g.note, fav: g.fav } }; render();
+    }, "Bewerk " + g.title);
+    more.setAttribute("aria-expanded", editing && editing.id === g.id ? "true" : "false"); main.appendChild(more);
+  } else {
+    const c = btn("btn claim" + (by === me ? " primary" : ""), by === me ? "✓ Ik koop dit" : by ? "Al genomen" : "Ik koop dit", () => claimGift(g));
+    c.setAttribute("aria-pressed", by === me ? "true" : "false"); c.disabled = !!by && by !== me; main.appendChild(c);
+  }
+  li.appendChild(main);
+  const ed = mine ? giftEditor(g) : null; if (ed) li.appendChild(ed);
+  return li;
+}
+function viewGifts(v) {
+  if (!giftsReady) {
+    const e = el("div", "empty"); e.appendChild(el("b", null, "Cadeaulijstjes zijn nog niet geactiveerd"));
+    e.appendChild(el("span", null, "Voer eenmalig supabase/003_gifts.sql uit in de Supabase SQL Editor. Daarna verschijnen de lijstjes hier."));
+    v.appendChild(e); return;
+  }
+  const ppl = [...members].sort((a, b) => (a.user_id === me ? -1 : b.user_id === me ? 1 : a.display_name.localeCompare(b.display_name)));
+  if (!ppl.some(m => m.user_id === giftFor)) giftFor = me;
+  const chips = el("div", "chips"); chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Wiens lijstje");
+  ppl.forEach(m => {
+    const n = gifts.filter(g => g.owner === m.user_id).length;
+    const ch = btn("chip", null, () => { giftFor = m.user_id; store("giftFor", giftFor); editing = null; giftQ = ""; render(); });
+    ch.setAttribute("aria-pressed", giftFor === m.user_id ? "true" : "false");
+    ch.append(el("span", null, m.user_id === me ? "Mijn lijstje" : m.display_name), el("span", "n", String(n))); chips.appendChild(ch);
+  });
+  v.appendChild(chips);
+  const mine = giftFor === me, list = gifts.filter(g => g.owner === giftFor);
+  if (mine) {
+    const om = omni("Wat wens je? Typ en druk op Enter…", giftQ, val => { giftQ = val; render(); }, val => { const t = val.trim(); if (!t) return; giftQ = ""; addGift(t); });
+    if (giftQ.trim()) { const res = el("div", "results"); res.appendChild(newRow("“" + giftQ.trim() + "” op mijn lijstje zetten", "Met ⋯ voeg je daarna een link, prijs of uitleg toe", () => { const t = giftQ.trim(); giftQ = ""; addGift(t); })); om.appendChild(res); }
+    v.appendChild(om);
+    v.appendChild(el("p", "hint", "Jouw lijstje is zichtbaar voor het hele gezin. Wie iets koopt, zie jij niet: zo blijft het een verrassing."));
+  } else {
+    const who = person(giftFor) || "dit gezinslid";
+    v.appendChild(el("p", "hint", "Tik op Ik koop dit, dan weet de rest dat het geregeld is. " + who + " ziet dat niet."));
+  }
+  if (!list.length) {
+    const e = el("div", "empty");
+    e.appendChild(el("b", null, mine ? "Je lijstje is nog leeg" : (person(giftFor) || "Dit gezinslid") + " heeft nog niets op het lijstje gezet"));
+    e.appendChild(el("span", null, mine ? "Typ hierboven wat je graag zou krijgen." : "Vraag of ze hun lijstje willen invullen via het tabblad Cadeaus."));
+    v.appendChild(e); return;
+  }
+  const order = (a, b) => (b.fav - a.fav) || a.at - b.at;
+  const open = list.filter(g => mine || !claims[g.id]).sort(order), taken = mine ? [] : list.filter(g => claims[g.id]).sort(order);
+  if (open.length) {
+    const sec = el("section", "section"); const h = el("h2", null, mine ? "Mijn wensen" : "Nog te kopen"); h.appendChild(el("span", null, String(open.length)));
+    const ul = el("ul", "rows"); open.forEach(g => ul.appendChild(giftRow(g, mine))); sec.append(h, ul); v.appendChild(sec);
+  }
+  if (taken.length) {
+    const sec = el("section", "section"); const h = el("h2", null, "Al geregeld"); h.appendChild(el("span", null, String(taken.length)));
+    const ul = el("ul", "rows"); taken.forEach(g => ul.appendChild(giftRow(g, false))); sec.append(h, ul); v.appendChild(sec);
+  }
+}
+
 function bars(rows) {
   const ul = el("ul", "bars"); const max = Math.max(1, ...rows.map(r => r[1]));
   rows.forEach(([label, n, c]) => {
@@ -664,13 +805,13 @@ function render() {
     return;
   }
   document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false"));
-  $("title").textContent = { list: "Deze week", staples: "Vaste items", history: "Historiek", stats: "Statistieken" }[tab];
+  $("title").textContent = { list: "Deze week", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Statistieken" }[tab];
   $("eyebrow").textContent = tab === "list" && current && current.startedAt ? household.name + " · sinds " + fmtDate(current.startedAt) : household.name;
   const open = thisWeek().filter(i => !i.done).length;
   $("badge").hidden = !open; $("badge").textContent = String(open);
   const act = document.activeElement, keepId = act && act.id, sel = act && typeof act.selectionStart === "number" ? act.selectionStart : null;
   v.textContent = "";
-  ({ list: viewList, staples: viewStaples, history: viewHistory, stats: viewStats })[tab](v);
+  ({ list: viewList, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats })[tab](v);
   if (keepId && $(keepId) && $(keepId) !== act) { const n = $(keepId); n.focus(); if (sel != null && n.setSelectionRange) { const p = Math.min(sel, n.value.length); n.setSelectionRange(p, p); } }
 }
 
