@@ -369,6 +369,7 @@ function itemRow(it) {
   const pd = person(it.doneBy, it.doneByName), pa = person(it.by, it.byName);
   const who = it.done ? (pd ? "In de mand · " + pd : "In de mand") : pa;
   if (who) meta.appendChild(el("span", null, who));
+  mealsForItem(it.name).forEach(t => meta.appendChild(el("span", "menu-tag", "🍴 " + t)));
   if (meta.childNodes.length) lab.appendChild(meta);
   b.appendChild(lab);
   if (it.qty) b.appendChild(el("span", "qty", it.qty));
@@ -748,14 +749,33 @@ function ingredientsOf(recipeList) {
   const seen = new Map();
   recipeList.forEach(r => r.ingredients.forEach(l => {
     const p = parseIngredient(l); if (!p || p.name.length > 80) return;
-    const k = key(p.name), had = seen.get(k);
+    const k = key(p.name), hk = [...seen.keys()].find(x => sameProduct(x, k)), had = hk && seen.get(hk);
     if (had) had.qty = addQty(had.qty, p.qty); else seen.set(k, { ...p });
   }));
   return [...seen.values()];
 }
+/* Which upcoming meals (today and the next 6 days) need this product, e.g. "Spaghetti bolognese · do". */
+function sameProduct(a, b) {
+  if (a === b) return true;
+  const [s, l] = a.length < b.length ? [a, b] : [b, a];
+  return s.length >= 2 && l.startsWith(s) && l.length - s.length <= 2; // ui / uien, wortel / wortels
+}
+const onListLike = n => thisWeek().find(i => sameProduct(key(i.name), key(n)));
+function mealsForItem(name) {
+  if (!menuReady || !recipes.length) return [];
+  const k = key(name), out = [], start = new Date();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    const m = meals[dayKey(d)], r = m && m.recipe && recipeById(m.recipe);
+    if (!r || !r.ingredients.some(l => { const p = parseIngredient(l); return p && sameProduct(key(p.name), k); })) continue;
+    const label = r.name + " · " + (i === 0 ? "vandaag" : i === 1 ? "morgen" : DAY_SHORT[(d.getDay() + 6) % 7].toLowerCase());
+    if (!out.some(x => x.startsWith(r.name + " · "))) out.push(label);
+  }
+  return out;
+}
 async function addIngredients(list) {
   for (const p of list) {
-    if (onListByName(p.name)) continue;
+    if (onListLike(p.name)) continue;
     const k = known().get(key(p.name));
     await addItem(k ? { name: k.name, qty: p.qty, cat: k.cat, shops: k.shops } : { name: p.name, qty: p.qty });
   }
@@ -843,7 +863,7 @@ function recipeEditor(r) {
   box.appendChild(field("Uitleg (optioneel)", n));
   const ingList = ingredientsOf([r]);
   if (ingList.length) {
-    const missing = ingList.filter(p => !onListByName(p.name));
+    const missing = ingList.filter(p => !onListLike(p.name));
     const b = btn("btn", missing.length ? "🛒 " + missing.length + " ingrediënt" + (missing.length === 1 ? "" : "en") + " op de boodschappenlijst" : "✓ Alles staat al op de lijst", async e => { e.currentTarget.disabled = true; await addIngredients(missing); render(); });
     b.disabled = !missing.length || !writable(); b.style.alignSelf = "flex-start"; box.appendChild(b);
   }
@@ -939,7 +959,7 @@ function viewMenu(v) {
   // Ingredients of what's still coming this week → shopping list.
   const upcoming = days.map(dayKey).filter(k => k >= today).map(k => meals[k] && meals[k].recipe && recipeById(meals[k].recipe)).filter(Boolean);
   if (upcoming.length && writable()) {
-    const ing = ingredientsOf(upcoming), missing = ing.filter(p => !onListByName(p.name));
+    const ing = ingredientsOf(upcoming), missing = ing.filter(p => !onListLike(p.name));
     const foot = el("div", "weekfoot");
     if (!ing.length) foot.appendChild(el("span", null, "Tip: zet bij een recept de ingrediënten, dan zet je ze met één tik op de boodschappenlijst."));
     else if (!missing.length) foot.appendChild(el("span", null, "✓ Alle ingrediënten van " + (menuOffset ? "die" : "deze") + " week staan op de boodschappenlijst."));
