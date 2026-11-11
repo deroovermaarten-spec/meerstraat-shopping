@@ -4,7 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Meerstraat Boodschappen</title>
-<meta name="theme-color" content="#1f6a45">
+<meta name="theme-color" content="#f5f6fa">
+<script>
+/* Colour and mode chosen in Instellingen, applied before the page paints. Saved per device. */
+window.THEME = {
+  accents: { smaragd: ["Smaragd", "#059669", "#34d399"], oceaan: ["Oceaan", "#2563eb", "#60a5fa"], indigo: ["Indigo", "#4f46e5", "#818cf8"],
+             framboos: ["Framboos", "#db2777", "#f472b6"], oranje: ["Oranje", "#ea580c", "#fb923c"], grafiet: ["Grafiet", "#334155", "#cbd5e1"] },
+  get(k, d) { try { return localStorage.getItem(k) || d; } catch (_) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
+  apply() {
+    const r = document.documentElement, a = this.accents[this.get("accent", "indigo")] || this.accents.indigo, m = this.get("mode", "system");
+    r.style.setProperty("--accent-l", a[1]); r.style.setProperty("--accent-d", a[2]);
+    if (m === "light" || m === "dark") r.dataset.theme = m; else delete r.dataset.theme;
+    const dark = m === "dark" || (m !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+    const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = dark ? "#0b0f17" : "#f5f6fa";
+  }
+};
+THEME.apply();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => THEME.apply());
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Boodschappen">
 <link rel="manifest" href="manifest.webmanifest">

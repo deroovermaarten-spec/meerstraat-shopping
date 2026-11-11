@@ -598,24 +598,55 @@ function viewOnboard(v) {
   v.appendChild(card);
 }
 
-/* Header: account panel */
+/* Header: settings panel (colour, light/dark, household, sign out) */
+const GEAR = '<svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+function section(label) { const s = el("div", "set-sec"); s.appendChild(el("span", "lbl", label)); return s; }
 function drawWho() {
   const b = $("me-btn"); b.hidden = screen !== "app"; b.textContent = ""; b.setAttribute("aria-expanded", whoOpen ? "true" : "false");
+  b.setAttribute("aria-label", "Instellingen");
   const myName = person(me) || "Ik";
   b.append(el("span", "av", myName[0].toUpperCase()), el("span", null, myName));
+  b.insertAdjacentHTML("beforeend", GEAR);
   const p = $("whopanel"); p.textContent = ""; p.hidden = !whoOpen || screen !== "app"; p.className = whoOpen ? "whopanel" : "";
   if (p.hidden) return;
-  p.appendChild(el("p", null, "Aangemeld als " + myName + " (" + (session.user.email || "") + ")."));
+  p.appendChild(el("h2", "set-h", "Instellingen"));
+
+  const T = window.THEME;
+  const col = section("Kleur"), sw = el("div", "swatches");
+  const curA = T.get("accent", "indigo");
+  Object.entries(T.accents).forEach(([k, [n, light, dark]]) => {
+    const isDark = getComputedStyle(document.documentElement).colorScheme === "dark";
+    const s = btn("swatch", "", () => { T.set("accent", k); T.apply(); drawWho(); render(); });
+    s.style.setProperty("--sw", isDark ? dark : light);
+    s.setAttribute("aria-pressed", k === curA ? "true" : "false");
+    s.append(el("i"), el("span", null, n)); sw.appendChild(s);
+  });
+  col.appendChild(sw); p.appendChild(col);
+
+  const look = section("Weergave"), seg = el("div", "seg");
+  const curM = T.get("mode", "system");
+  [["system", "Systeem"], ["light", "Licht"], ["dark", "Donker"]].forEach(([k, n]) => {
+    const s = btn(null, n, () => { T.set("mode", k); T.apply(); drawWho(); render(); });
+    s.setAttribute("aria-pressed", k === curM ? "true" : "false"); seg.appendChild(s);
+  });
+  look.appendChild(seg); look.appendChild(el("p", null, "Deze keuze geldt voor dit toestel."));
+  p.appendChild(look);
+
+  const fam = section("Gezin");
   const g = el("div", "whogrid");
   members.forEach(m => { const x = el("div"); x.className = "whocell"; x.append(el("span", "av", m.display_name[0].toUpperCase()), el("span", null, m.display_name)); g.appendChild(x); });
-  p.appendChild(g);
+  fam.appendChild(g);
   const code = el("div", "acts");
   const c = el("span", null); c.append(document.createTextNode("Gezinscode: "), el("b", "code", household.invite_code));
   const copy = btn("link", "Kopieer", async () => { try { await navigator.clipboard.writeText(household.invite_code); copy.textContent = "Gekopieerd"; } catch (_) {} });
-  code.append(c, copy); p.appendChild(code);
-  p.appendChild(el("p", null, "Nieuwe gezinsleden maken een account en vullen deze code in."));
+  code.append(c, copy); fam.appendChild(code);
+  fam.appendChild(el("p", null, "Nieuwe gezinsleden maken een account en vullen deze code in."));
+  p.appendChild(fam);
+
+  const acc = section("Account");
+  acc.appendChild(el("p", null, "Aangemeld als " + myName + " (" + (session.user.email || "") + ")."));
   const out = btn("btn", "Afmelden / andere gebruiker", async () => { whoOpen = false; await sb.auth.signOut(); });
-  p.appendChild(out);
+  acc.appendChild(out); p.appendChild(acc);
 }
 $("me-btn").addEventListener("click", () => { whoOpen = !whoOpen; drawWho(); });
 
