@@ -48,7 +48,8 @@ let items = [], staples = [], weeks = {}, current = null, loaded = false;
 let gifts = [], claims = {}, giftsReady = true; // claims: gift id → user id (never includes your own wishes)
 let recipes = [], meals = {}, menuReady = true; // meals: "YYYY-MM-DD" → { recipe, note }
 let menuOffset = 0, mealQ = "", recipeQ = "", confirmIngredients = false;
-let tab = store("tab") || "list"; if (!["list", "menu", "staples", "gifts", "history", "stats"].includes(tab)) tab = "list";
+let tab = store("tab") || "list"; if (!["list", "menu", "staples", "gifts", "history", "stats", "more"].includes(tab)) tab = "list";
+const UNDER_MORE = ["gifts", "stats"]; // reached through the Meer tab
 let shopFilter = store("shop") || "all"; if (shopFilter !== "all" && !SHOP_NAME[shopFilter]) shopFilter = "all";
 let giftFor = store("giftFor") || "", giftQ = "";
 let omniQ = "", staplesQ = "", editing = null, confirmFinish = false, whoOpen = false, showAllQuick = false;
@@ -1004,6 +1005,27 @@ function viewMenu(v) {
   v.appendChild(sec);
 }
 
+/* Meer: the less-used parts of the app, one tap away. */
+const GIFT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v9H4v-9M2 7h20v5H2zM12 21V7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>';
+const STATS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>';
+const GEAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>';
+function viewMore(v) {
+  const mine = gifts.filter(g => g.owner === me).length, others = gifts.filter(g => g.owner !== me && !claims[g.id]).length;
+  const rows = [
+    [GIFT_ICON, "Cadeaus", giftsReady ? (mine ? mine + " op jouw lijstje" : "Jouw lijstje is nog leeg") + (others ? " · " + others + (others === 1 ? " wens" : " wensen") + " van de anderen open" : "") : "Verlanglijstjes van het gezin", () => setTab("gifts")],
+    [STATS_ICON, "Cijfers", "Wat jullie het meest kopen, waar en door wie", () => setTab("stats")],
+    [GEAR_ICON, "Instellingen", "Kleur, licht of donker, gezinscode en afmelden", () => { whoOpen = true; drawWho(); window.scrollTo(0, 0); }],
+  ];
+  const ul = el("ul", "rows morelist");
+  rows.forEach(([icon, name, sub, go]) => {
+    const li = el("li"), b = btn("moreitem", null, go);
+    const ic = el("span", "ic"); ic.innerHTML = icon;
+    const lab = el("span", "label"); lab.append(el("span", "name", name), el("span", "meta", sub));
+    b.append(ic, lab, el("span", "chev", "›")); li.appendChild(b); ul.appendChild(li);
+  });
+  v.appendChild(ul);
+}
+
 function bars(rows) {
   const ul = el("ul", "bars"); const max = Math.max(1, ...rows.map(r => r[1]));
   rows.forEach(([label, n, c]) => {
@@ -1144,14 +1166,15 @@ function render() {
     if (screen === "auth") viewAuth(v); else if (screen === "onboard") viewOnboard(v); else v.appendChild(Object.assign(el("div", "empty"), { innerHTML: "<b>Laden…</b>" }));
     return;
   }
-  document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false"));
-  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Cijfers" }[tab];
+  document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab || (b.dataset.tab === "more" && UNDER_MORE.includes(tab)) ? "true" : "false"));
+  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Cijfers", more: "Meer" }[tab];
   $("eyebrow").textContent = tab === "list" && current && current.startedAt ? household.name + " · sinds " + fmtDate(current.startedAt) : household.name;
   const open = thisWeek().filter(i => !i.done).length;
   $("badge").hidden = !open; $("badge").textContent = String(open);
   const act = document.activeElement, keepId = act && act.id, sel = act && typeof act.selectionStart === "number" ? act.selectionStart : null;
   v.textContent = "";
-  ({ list: viewList, menu: viewMenu, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats })[tab](v);
+  if (UNDER_MORE.includes(tab)) v.appendChild(btn("link backlink", "‹ Meer", () => setTab("more")));
+  ({ list: viewList, menu: viewMenu, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats, more: viewMore })[tab](v);
   if (keepId && $(keepId) && $(keepId) !== act) { const n = $(keepId); n.focus(); if (sel != null && n.setSelectionRange) { const p = Math.min(sel, n.value.length); n.setSelectionRange(p, p); } }
 }
 
