@@ -48,7 +48,8 @@ let items = [], staples = [], weeks = {}, current = null, loaded = false;
 let gifts = [], claims = {}, giftsReady = true; // claims: gift id → user id (never includes your own wishes)
 let recipes = [], meals = {}, menuReady = true; // meals: "YYYY-MM-DD" → { recipe, note }
 let menuOffset = 0, mealQ = "", recipeQ = "", confirmIngredients = false;
-let tab = store("tab") || "list"; if (!["list", "menu", "staples", "gifts", "history", "stats"].includes(tab)) tab = "list";
+let tab = store("tab") || "list"; if (!["list", "menu", "staples", "gifts", "history", "stats", "more"].includes(tab)) tab = "list";
+const UNDER_MORE = ["gifts", "stats"]; // reached through the Meer tab
 let shopFilter = store("shop") || "all"; if (shopFilter !== "all" && !SHOP_NAME[shopFilter]) shopFilter = "all";
 let giftFor = store("giftFor") || "", giftQ = "";
 let omniQ = "", staplesQ = "", editing = null, confirmFinish = false, whoOpen = false, showAllQuick = false;
@@ -369,6 +370,7 @@ function itemRow(it) {
   const pd = person(it.doneBy, it.doneByName), pa = person(it.by, it.byName);
   const who = it.done ? (pd ? "In de mand · " + pd : "In de mand") : pa;
   if (who) meta.appendChild(el("span", null, who));
+  mealsForItem(it.name).forEach(t => meta.appendChild(el("span", "menu-tag", "🍴 " + t)));
   if (meta.childNodes.length) lab.appendChild(meta);
   b.appendChild(lab);
   if (it.qty) b.appendChild(el("span", "qty", it.qty));
@@ -733,14 +735,48 @@ function parseIngredient(line) {
   const name = (m ? m[2] : t).trim(), qty = m ? m[1].replace(/\.$/, "").trim() : "";
   return { name: name.charAt(0).toUpperCase() + name.slice(1), qty: qty.slice(0, 12) };
 }
+/* "500 g" + "500 g" → "1000 g"; different units stay side by side ("1 + 200 g"). */
+function addQty(a, b) {
+  if (!a || !b) return a || b;
+  const pa = a.match(/^(\d+(?:[.,]\d+)?)\s*(.*)$/), pb = b.match(/^(\d+(?:[.,]\d+)?)\s*(.*)$/);
+  if (pa && pb && pa[2].toLowerCase() === pb[2].toLowerCase()) {
+    const n = parseFloat(pa[1].replace(",", ".")) + parseFloat(pb[1].replace(",", "."));
+    return (String(Math.round(n * 100) / 100).replace(".", ",") + (pa[2] ? " " + pa[2] : "")).trim();
+  }
+  return a + " + " + b;
+}
+/* Ingredients of several recipes as one list: the same product once, with the amounts added up. */
 function ingredientsOf(recipeList) {
   const seen = new Map();
-  recipeList.forEach(r => r.ingredients.forEach(l => { const p = parseIngredient(l); if (p && p.name.length <= 80 && !seen.has(key(p.name))) seen.set(key(p.name), p); }));
+  recipeList.forEach(r => r.ingredients.forEach(l => {
+    const p = parseIngredient(l); if (!p || p.name.length > 80) return;
+    const k = key(p.name), hk = [...seen.keys()].find(x => sameProduct(x, k)), had = hk && seen.get(hk);
+    if (had) had.qty = addQty(had.qty, p.qty); else seen.set(k, { ...p });
+  }));
   return [...seen.values()];
+}
+/* Which upcoming meals (today and the next 6 days) need this product, e.g. "Spaghetti bolognese · do". */
+function sameProduct(a, b) {
+  if (a === b) return true;
+  const [s, l] = a.length < b.length ? [a, b] : [b, a];
+  return s.length >= 2 && l.startsWith(s) && l.length - s.length <= 2; // ui / uien, wortel / wortels
+}
+const onListLike = n => thisWeek().find(i => sameProduct(key(i.name), key(n)));
+function mealsForItem(name) {
+  if (!menuReady || !recipes.length) return [];
+  const k = key(name), out = [], start = new Date();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    const m = meals[dayKey(d)], r = m && m.recipe && recipeById(m.recipe);
+    if (!r || !r.ingredients.some(l => { const p = parseIngredient(l); return p && sameProduct(key(p.name), k); })) continue;
+    const label = r.name + " · " + (i === 0 ? "vandaag" : i === 1 ? "morgen" : DAY_SHORT[(d.getDay() + 6) % 7].toLowerCase());
+    if (!out.some(x => x.startsWith(r.name + " · "))) out.push(label);
+  }
+  return out;
 }
 async function addIngredients(list) {
   for (const p of list) {
-    if (onListByName(p.name)) continue;
+    if (onListLike(p.name)) continue;
     const k = known().get(key(p.name));
     await addItem(k ? { name: k.name, qty: p.qty, cat: k.cat, shops: k.shops } : { name: p.name, qty: p.qty });
   }
@@ -749,6 +785,19 @@ async function addIngredients(list) {
 function mealPicker(day) {
   if (!editing || editing.kind !== "meal" || editing.id !== day) return null;
   const box = el("div", "editor picker-box"), cur = meals[day], stats = recipeStats();
+  const chosen = cur && cur.recipe && recipeById(cur.recipe);
+  if (chosen) {
+    const card = el("div", "recipe-card");
+    card.appendChild(el("b", null, chosen.name));
+    if (chosen.note) card.appendChild(el("span", "desc", chosen.note));
+    if (chosen.ingredients.length) { const ul = el("ul", "ing-list"); chosen.ingredients.forEach(x => ul.appendChild(el("li", null, x))); card.appendChild(ul); }
+    const row = el("div", "acts"); row.style.justifyContent = "flex-start";
+    const href = safeLink(chosen.link);
+    if (href) { const a = el("a", "btn", "Recept openen ↗"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; row.appendChild(a); }
+    row.appendChild(btn("link", chosen.ingredients.length || chosen.link ? "Recept aanpassen" : "Ingrediënten of link toevoegen", () => { mealQ = ""; openRecipeFromDay(chosen); }));
+    card.appendChild(row); box.appendChild(card);
+    box.appendChild(el("p", "hint", "Iets anders eten? Kies hieronder een ander recept."));
+  }
   const f = el("div", "field mini"); f.innerHTML = SEARCH;
   const inp = el("input"); inp.type = "text"; inp.id = "meal-q"; inp.placeholder = recipes.length ? "Zoek een recept of typ iets anders…" : "Wat eten jullie? bv. Spaghetti bolognese"; inp.value = mealQ; inp.autocomplete = "off"; inp.enterKeyHint = "done";
   inp.setAttribute("aria-label", "Zoek een recept");
@@ -786,9 +835,11 @@ function mealPicker(day) {
   const acts = el("div", "acts"), right = el("div", "acts");
   if (recipes.length > 1 && !q) {
     acts.appendChild(btn("btn", "🎲 Verras me", async () => {
-      const notRecent = [...recipes].sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
+      const near = new Set(Object.entries(meals).filter(([k, m]) => m.recipe && k !== day && Math.abs(dayMs(k) - dayMs(day)) < 7 * 864e5).map(([, m]) => m.recipe));
+      const notRecent = recipes.filter(r => !near.has(r.id)).sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
       const pool = notRecent.slice(0, Math.max(1, Math.ceil(notRecent.length / 2))).filter(r => !cur || r.id !== cur.recipe);
-      const pick = (pool.length ? pool : notRecent)[Math.floor(Math.random() * (pool.length || notRecent.length))];
+      const from = pool.length ? pool : notRecent.length ? notRecent : recipes;
+      const pick = from[Math.floor(Math.random() * from.length)];
       editing = null; await setMeal(day, pick.id, "");
     }));
   } else acts.appendChild(el("span"));
@@ -813,7 +864,7 @@ function recipeEditor(r) {
   box.appendChild(field("Uitleg (optioneel)", n));
   const ingList = ingredientsOf([r]);
   if (ingList.length) {
-    const missing = ingList.filter(p => !onListByName(p.name));
+    const missing = ingList.filter(p => !onListLike(p.name));
     const b = btn("btn", missing.length ? "🛒 " + missing.length + " ingrediënt" + (missing.length === 1 ? "" : "en") + " op de boodschappenlijst" : "✓ Alles staat al op de lijst", async e => { e.currentTarget.disabled = true; await addIngredients(missing); render(); });
     b.disabled = !missing.length || !writable(); b.style.alignSelf = "flex-start"; box.appendChild(b);
   }
@@ -824,16 +875,29 @@ function recipeEditor(r) {
     try { await updateRecipe(r.id, { name: d.name.trim().slice(0, 80) || r.name, ingredients: lines, link: d.link.trim() ? safeLink(d.link) || d.link.trim() : "", note: d.note.trim() }); } catch (err) { writeFailed(err); }
     editing = null; render();
   }));
-  acts.append(btn("btn ghost-danger", "Verwijderen", async () => { editing = null; await removeRecipe(r); }), right);
-  box.appendChild(acts);
+  if (d.confirmDelete) {
+    const planned = Object.entries(meals).filter(([k, m]) => m.recipe === r.id && k >= dayKey(new Date())).length;
+    const c = el("div", "confirm");
+    c.appendChild(el("span", null, "“" + r.name + "” uit jullie recepten verwijderen?" + (planned ? " Het staat nog " + planned + "× op het menu; die dag" + (planned === 1 ? " wordt" : "en worden") + " dan leeg." : "")));
+    const a = el("div", "acts"); a.style.justifyContent = "flex-end";
+    a.append(btn("btn", "Toch niet", () => { d.confirmDelete = false; render(); }), btn("btn primary danger", "Verwijderen", async () => { editing = null; await removeRecipe(r); }));
+    c.appendChild(a); box.appendChild(c);
+  } else {
+    acts.append(btn("btn ghost-danger", "Verwijderen", () => { d.confirmDelete = true; render(); }), right);
+    box.appendChild(acts);
+  }
   return box;
 }
 function openRecipe(r) {
   if (editing && editing.id === r.id) { editing = null; render(); return; }
   editing = { kind: "recipe", id: r.id, draft: { name: r.name, ingredients: r.ingredients.join("\n"), link: r.link, note: r.note } }; render();
 }
+function openRecipeFromDay(r) {
+  editing = null; recipeQ = ""; openRecipe(r);
+  const li = document.querySelector('[data-recipe="' + r.id + '"]'); if (li) li.scrollIntoView({ block: "center", behavior: "smooth" });
+}
 function recipeRow(r, stats) {
-  const li = el("li", "recipe"), main = el("div", "row-main"), lab = el("div", "label");
+  const li = el("li", "recipe"), main = el("div", "row-main"), lab = el("div", "label"); li.dataset.recipe = r.id;
   lab.appendChild(el("span", "name", r.name));
   if (r.note) lab.appendChild(el("span", "desc", r.note));
   const meta = el("span", "meta"), s = stats[r.id];
@@ -896,7 +960,7 @@ function viewMenu(v) {
   // Ingredients of what's still coming this week → shopping list.
   const upcoming = days.map(dayKey).filter(k => k >= today).map(k => meals[k] && meals[k].recipe && recipeById(meals[k].recipe)).filter(Boolean);
   if (upcoming.length && writable()) {
-    const ing = ingredientsOf(upcoming), missing = ing.filter(p => !onListByName(p.name));
+    const ing = ingredientsOf(upcoming), missing = ing.filter(p => !onListLike(p.name));
     const foot = el("div", "weekfoot");
     if (!ing.length) foot.appendChild(el("span", null, "Tip: zet bij een recept de ingrediënten, dan zet je ze met één tik op de boodschappenlijst."));
     else if (!missing.length) foot.appendChild(el("span", null, "✓ Alle ingrediënten van " + (menuOffset ? "die" : "deze") + " week staan op de boodschappenlijst."));
@@ -939,6 +1003,27 @@ function viewMenu(v) {
   }
   if (recipes.length) sec.appendChild(el("p", "hint", "Met ⋯ voeg je ingrediënten, een link of uitleg toe."));
   v.appendChild(sec);
+}
+
+/* Meer: the less-used parts of the app, one tap away. */
+const GIFT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12v9H4v-9M2 7h20v5H2zM12 21V7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>';
+const STATS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>';
+const GEAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>';
+function viewMore(v) {
+  const mine = gifts.filter(g => g.owner === me).length, others = gifts.filter(g => g.owner !== me && !claims[g.id]).length;
+  const rows = [
+    [GIFT_ICON, "Cadeaus", giftsReady ? (mine ? mine + " op jouw lijstje" : "Jouw lijstje is nog leeg") + (others ? " · " + others + (others === 1 ? " wens" : " wensen") + " van de anderen open" : "") : "Verlanglijstjes van het gezin", () => setTab("gifts")],
+    [STATS_ICON, "Cijfers", "Wat jullie het meest kopen, waar en door wie", () => setTab("stats")],
+    [GEAR_ICON, "Instellingen", "Kleur, licht of donker, gezinscode en afmelden", () => { whoOpen = true; drawWho(); window.scrollTo(0, 0); }],
+  ];
+  const ul = el("ul", "rows morelist");
+  rows.forEach(([icon, name, sub, go]) => {
+    const li = el("li"), b = btn("moreitem", null, go);
+    const ic = el("span", "ic"); ic.innerHTML = icon;
+    const lab = el("span", "label"); lab.append(el("span", "name", name), el("span", "meta", sub));
+    b.append(ic, lab, el("span", "chev", "›")); li.appendChild(b); ul.appendChild(li);
+  });
+  v.appendChild(ul);
 }
 
 function bars(rows) {
@@ -1081,14 +1166,15 @@ function render() {
     if (screen === "auth") viewAuth(v); else if (screen === "onboard") viewOnboard(v); else v.appendChild(Object.assign(el("div", "empty"), { innerHTML: "<b>Laden…</b>" }));
     return;
   }
-  document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false"));
-  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Statistieken" }[tab];
+  document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab || (b.dataset.tab === "more" && UNDER_MORE.includes(tab)) ? "true" : "false"));
+  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Cijfers", more: "Meer" }[tab];
   $("eyebrow").textContent = tab === "list" && current && current.startedAt ? household.name + " · sinds " + fmtDate(current.startedAt) : household.name;
   const open = thisWeek().filter(i => !i.done).length;
   $("badge").hidden = !open; $("badge").textContent = String(open);
   const act = document.activeElement, keepId = act && act.id, sel = act && typeof act.selectionStart === "number" ? act.selectionStart : null;
   v.textContent = "";
-  ({ list: viewList, menu: viewMenu, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats })[tab](v);
+  if (UNDER_MORE.includes(tab)) v.appendChild(btn("link backlink", "‹ Meer", () => setTab("more")));
+  ({ list: viewList, menu: viewMenu, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats, more: viewMore })[tab](v);
   if (keepId && $(keepId) && $(keepId) !== act) { const n = $(keepId); n.focus(); if (sel != null && n.setSelectionRange) { const p = Math.min(sel, n.value.length); n.setSelectionRange(p, p); } }
 }
 
