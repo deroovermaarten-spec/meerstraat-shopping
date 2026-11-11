@@ -194,7 +194,7 @@ body { margin: 0; }
 .photo-big { width: 120px; height: 120px; border-radius: 12px; object-fit: cover; border: 1px solid var(--line); }
 .photo-edit { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .desc { font-size: .8rem; color: var(--muted); overflow-wrap: anywhere; }
-textarea.txt { font: inherit; font-size: 16px; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; width: 100%; resize: vertical; }
+textarea.txt { font: inherit; font-size: 16px; font-weight: 400; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; width: 100%; resize: vertical; }
 
 /* Instellingen */
 .set-h { text-transform: none; letter-spacing: -0.01em; font-family: var(--display); font-weight: 700; font-size: 1.05rem; margin: 0; color: var(--fg); }
@@ -278,3 +278,14 @@ li.done .menu-tag { color: var(--muted); font-weight: 500; }
 .dislike-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: .88rem; color: var(--muted); }
 .dislike-list b { color: var(--fg); font-weight: 600; }
 .warn-tag { color: var(--warn); font-weight: 600; }
+
+/* Recipes from a link */
+li.recipe .rphoto { width: 52px; height: 52px; border-radius: 10px; margin-left: 12px; }
+.recipe-photo { width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; background: var(--accent-soft); }
+.recipe-card .lbl { font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+.ing-list.steps { padding-left: 22px; gap: 6px; }
+.editor .two.even { grid-template-columns: 1fr 1fr; }
+.res.importing { cursor: default; }
+.spin { flex: none; width: 24px; height: 24px; border-radius: 50%; border: 3px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s; } }
