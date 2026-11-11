@@ -64,6 +64,20 @@ const onListByName = n => thisWeek().find(i => key(i.name) === key(n));
 const stapleByName = n => staples.find(s => key(s.name) === key(n));
 const writable = () => canWrite && !!household;
 function person(id) { return id && names[id] ? names[id] : ""; }
+/* Profiles (005_profiles.sql): an emoji as picture and what someone would rather not eat. */
+const memberOf = id => members.find(m => m.user_id === id);
+const profilesReady = () => members.length > 0 && "emoji" in members[0];
+function avatar(id, cls) {
+  const m = memberOf(id), n = (m && m.display_name) || person(id) || "?";
+  const a = el("span", "av" + (cls ? " " + cls : ""), m && m.emoji ? m.emoji : n[0].toUpperCase());
+  if (m && m.emoji) a.classList.add("emo");
+  return a;
+}
+async function saveProfile(patch) {
+  const m = memberOf(me); if (m) Object.assign(m, patch);
+  render();
+  try { must(await sb.from("members").update(patch).eq("household_id", household.id).eq("user_id", me)); } catch (e) { writeFailed(e); scheduleReload(); }
+}
 
 function showStatus(text, warn) { const s = $("status"); s.textContent = text; s.className = "status" + (warn ? " warn" : ""); s.hidden = !text; }
 function writeFailed(e) {
@@ -110,7 +124,7 @@ async function loadAll() {
   const h = household.id;
   const [hh, mem, wk, st, it] = await Promise.all([
     sb.from("households").select("*").eq("id", h).single(),
-    sb.from("members").select("user_id, display_name").eq("household_id", h),
+    sb.from("members").select("*").eq("household_id", h),
     sb.from("weeks").select("*").eq("household_id", h),
     sb.from("staples").select("*").eq("household_id", h),
     sb.from("items").select("*").eq("household_id", h).order("created_at").limit(5000),
@@ -675,6 +689,7 @@ function viewGifts(v) {
     const n = gifts.filter(g => g.owner === m.user_id).length;
     const ch = btn("chip", null, () => { giftFor = m.user_id; store("giftFor", giftFor); editing = null; giftQ = ""; render(); });
     ch.setAttribute("aria-pressed", giftFor === m.user_id ? "true" : "false");
+    if (m.emoji) ch.appendChild(el("span", null, m.emoji));
     ch.append(el("span", null, m.user_id === me ? "Mijn lijstje" : m.display_name), el("span", "n", String(n))); chips.appendChild(ch);
   });
   v.appendChild(chips);
@@ -774,6 +789,22 @@ function mealsForItem(name) {
   }
   return out;
 }
+/* Who in the family would rather not eat this recipe, and why: [["Erin", "champignons"], …] */
+function dislikesFor(r) {
+  if (!r || !profilesReady()) return [];
+  const words = [key(r.name), ...r.ingredients.map(l => { const p = parseIngredient(l); return p ? key(p.name) : ""; })].filter(Boolean);
+  const out = [];
+  members.forEach(m => (m.dislikes || []).forEach(d => {
+    const k = key(d); if (k.length < 2) return;
+    if (words.some(w => w.includes(k) || sameProduct(w, k) || k.includes(w) && w.length >= 4)) out.push([m.display_name, d]);
+  }));
+  return out;
+}
+function dislikeTag(list) {
+  if (!list.length) return null;
+  const byName = {}; list.forEach(([n, d]) => { (byName[n] = byName[n] || []).push(d); });
+  return el("span", "warn-tag", "⚠ " + Object.entries(byName).map(([n, ds]) => n + ": " + ds.join(", ")).join(" · "));
+}
 async function addIngredients(list) {
   for (const p of list) {
     if (onListLike(p.name)) continue;
@@ -790,6 +821,7 @@ function mealPicker(day) {
     const card = el("div", "recipe-card");
     card.appendChild(el("b", null, chosen.name));
     if (chosen.note) card.appendChild(el("span", "desc", chosen.note));
+    const ct = dislikeTag(dislikesFor(chosen)); if (ct) card.appendChild(ct);
     if (chosen.ingredients.length) { const ul = el("ul", "ing-list"); chosen.ingredients.forEach(x => ul.appendChild(el("li", null, x))); card.appendChild(ul); }
     const row = el("div", "acts"); row.style.justifyContent = "flex-start";
     const href = safeLink(chosen.link);
@@ -820,7 +852,9 @@ function mealPicker(day) {
     const s = stats[r.id], chosen = cur && cur.recipe === r.id;
     const row = btn("res" + (chosen ? " onlist" : ""), null, async () => { editing = null; mealQ = ""; await setMeal(day, r.id, ""); });
     const lab = el("span", "label"); lab.appendChild(el("span", "name", r.name));
-    lab.appendChild(el("span", "meta", s ? s.times + "× gegeten · laatst " + fmtDate(dayMs(s.last)) : "Nog niet op het menu gezet"));
+    const pm = el("span", "meta", s ? s.times + "× gegeten · laatst " + fmtDate(dayMs(s.last)) : "Nog niet op het menu gezet");
+    const pt = dislikeTag(dislikesFor(r)); if (pt) { pm.append(document.createTextNode(" "), pt); }
+    lab.appendChild(pm);
     row.append(lab, el("span", "plus", chosen ? "✓" : "+")); row.disabled = !writable(); res.appendChild(row);
   });
   if (q && !recipes.some(r => key(r.name) === t)) {
@@ -836,7 +870,8 @@ function mealPicker(day) {
   if (recipes.length > 1 && !q) {
     acts.appendChild(btn("btn", "🎲 Verras me", async () => {
       const near = new Set(Object.entries(meals).filter(([k, m]) => m.recipe && k !== day && Math.abs(dayMs(k) - dayMs(day)) < 7 * 864e5).map(([, m]) => m.recipe));
-      const notRecent = recipes.filter(r => !near.has(r.id)).sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
+      const liked = recipes.filter(r => !dislikesFor(r).length);
+      const notRecent = (liked.length >= 2 ? liked : recipes).filter(r => !near.has(r.id)).sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
       const pool = notRecent.slice(0, Math.max(1, Math.ceil(notRecent.length / 2))).filter(r => !cur || r.id !== cur.recipe);
       const from = pool.length ? pool : notRecent.length ? notRecent : recipes;
       const pick = from[Math.floor(Math.random() * from.length)];
@@ -904,6 +939,7 @@ function recipeRow(r, stats) {
   const bits = []; if (r.ingredients.length) bits.push(r.ingredients.length + " ingrediënt" + (r.ingredients.length === 1 ? "" : "en"));
   bits.push(s ? s.times + "× gegeten · laatst " + fmtDate(dayMs(s.last)) : "Nog niet gegeten");
   meta.appendChild(el("span", null, bits.join(" · ")));
+  const rt = dislikeTag(dislikesFor(r)); if (rt) meta.appendChild(rt);
   const href = safeLink(r.link);
   if (href) { const a = el("a", "glink", linkHost(href) + " ↗"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; meta.appendChild(a); }
   lab.appendChild(meta); main.appendChild(lab);
@@ -949,6 +985,7 @@ function viewMenu(v) {
     if (k === today) meta.appendChild(el("span", "tag", "Vandaag"));
     if (r && r.ingredients.length) meta.appendChild(el("span", null, r.ingredients.length + " ingrediënt" + (r.ingredients.length === 1 ? "" : "en")));
     if (m && !m.recipe && m.note) meta.appendChild(el("span", null, "Zonder recept"));
+    const dt = dislikeTag(dislikesFor(r)); if (dt) meta.appendChild(dt);
     if (meta.childNodes.length) lab.appendChild(meta);
     b.append(cal, lab); main.appendChild(b);
     li.appendChild(main);
@@ -1103,12 +1140,40 @@ function viewOnboard(v) {
 
 /* Header: settings panel (colour, light/dark, household, sign out) */
 const GEAR = '<svg class="gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+const EMOJIS = ["😀", "😎", "🤓", "🥳", "😺", "🐶", "🦊", "🐼", "🐨", "🦁", "🐸", "🐙", "🦄", "🐝", "🦖", "🐢", "🌻", "🌈", "⭐", "🔥", "⚽", "🎸", "🎨", "🚲", "🍕", "🍓", "🥑", "🧁", "🍦", "🌮"];
+let dislikeQ = "";
+function profileSection() {
+  const mine = memberOf(me) || {}, sec = section("Jouw profiel");
+  const grid = el("div", "emojis"); grid.setAttribute("role", "group"); grid.setAttribute("aria-label", "Kies je emoji");
+  const cur = mine.emoji || "";
+  [["", (mine.display_name || "?")[0].toUpperCase()], ...EMOJIS.map(e => [e, e])].forEach(([val, shown]) => {
+    const b = btn("emo-pick" + (val ? "" : " letter"), shown, () => saveProfile({ emoji: val }), val ? "Emoji " + val : "Geen emoji, je beginletter");
+    b.setAttribute("aria-pressed", cur === val ? "true" : "false"); grid.appendChild(b);
+  });
+  sec.append(el("p", null, "Kies een emoji als profielfoto. Het hele gezin ziet hem."), grid);
+  sec.appendChild(el("span", "lbl sub", "Wat eet je liever niet?"));
+  const list = mine.dislikes || [];
+  const chips = el("div", "quick-chips");
+  list.forEach(d => chips.appendChild(btn("dchip", d + " ×", () => saveProfile({ dislikes: list.filter(x => x !== d) }), d + " verwijderen")));
+  const add = () => {
+    const t = dislikeQ.trim().slice(0, 40); if (!t || list.some(x => key(x) === key(t))) { dislikeQ = ""; return; }
+    dislikeQ = ""; saveProfile({ dislikes: [...list, t] }); setTimeout(() => { const i = $("dislike-in"); if (i) i.focus(); }, 0);
+  };
+  const row = el("div", "dislike-add");
+  const inp = el("input", "txt"); inp.id = "dislike-in"; inp.placeholder = "bv. champignons, vis, spruitjes"; inp.value = dislikeQ; inp.maxLength = 40; inp.enterKeyHint = "done";
+  inp.addEventListener("input", () => { dislikeQ = inp.value; });
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+  row.append(inp, btn("btn", "Toevoegen", add));
+  if (list.length) sec.appendChild(chips);
+  sec.append(row, el("p", null, "In het weekmenu zie je dan bij welke gerechten iemand dit niet lust."));
+  return sec;
+}
 function section(label) { const s = el("div", "set-sec"); s.appendChild(el("span", "lbl", label)); return s; }
 function drawWho() {
   const b = $("me-btn"); b.hidden = screen !== "app"; b.textContent = ""; b.setAttribute("aria-expanded", whoOpen ? "true" : "false");
   b.setAttribute("aria-label", "Instellingen");
   const myName = person(me) || "Ik";
-  b.append(el("span", "av", myName[0].toUpperCase()), el("span", null, myName));
+  b.append(avatar(me), el("span", null, myName));
   b.insertAdjacentHTML("beforeend", GEAR);
   const p = $("whopanel"); p.textContent = ""; p.hidden = !whoOpen || screen !== "app"; p.className = whoOpen ? "whopanel" : "";
   if (p.hidden) return;
@@ -1135,10 +1200,17 @@ function drawWho() {
   look.appendChild(seg); look.appendChild(el("p", null, "Deze keuze geldt voor dit toestel."));
   p.appendChild(look);
 
+  if (profilesReady()) p.appendChild(profileSection());
   const fam = section("Gezin");
   const g = el("div", "whogrid");
-  members.forEach(m => { const x = el("div"); x.className = "whocell"; x.append(el("span", "av", m.display_name[0].toUpperCase()), el("span", null, m.display_name)); g.appendChild(x); });
+  members.forEach(m => { const x = el("div"); x.className = "whocell"; x.append(avatar(m.user_id), el("span", null, m.display_name)); g.appendChild(x); });
   fam.appendChild(g);
+  const picky = members.filter(m => (m.dislikes || []).length);
+  if (picky.length) {
+    const ul = el("ul", "dislike-list");
+    picky.forEach(m => { const li = el("li"); li.append(el("b", null, m.display_name + ": "), document.createTextNode(m.dislikes.join(", "))); ul.appendChild(li); });
+    fam.append(el("span", "lbl sub", "Eet liever niet"), ul);
+  }
   const code = el("div", "acts");
   const c = el("span", null); c.append(document.createTextNode("Gezinscode: "), el("b", "code", household.invite_code));
   const copy = btn("link", "Kopieer", async () => { try { await navigator.clipboard.writeText(household.invite_code); copy.textContent = "Gekopieerd"; } catch (_) {} });
