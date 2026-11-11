@@ -733,9 +733,24 @@ function parseIngredient(line) {
   const name = (m ? m[2] : t).trim(), qty = m ? m[1].replace(/\.$/, "").trim() : "";
   return { name: name.charAt(0).toUpperCase() + name.slice(1), qty: qty.slice(0, 12) };
 }
+/* "500 g" + "500 g" → "1000 g"; different units stay side by side ("1 + 200 g"). */
+function addQty(a, b) {
+  if (!a || !b) return a || b;
+  const pa = a.match(/^(\d+(?:[.,]\d+)?)\s*(.*)$/), pb = b.match(/^(\d+(?:[.,]\d+)?)\s*(.*)$/);
+  if (pa && pb && pa[2].toLowerCase() === pb[2].toLowerCase()) {
+    const n = parseFloat(pa[1].replace(",", ".")) + parseFloat(pb[1].replace(",", "."));
+    return (String(Math.round(n * 100) / 100).replace(".", ",") + (pa[2] ? " " + pa[2] : "")).trim();
+  }
+  return a + " + " + b;
+}
+/* Ingredients of several recipes as one list: the same product once, with the amounts added up. */
 function ingredientsOf(recipeList) {
   const seen = new Map();
-  recipeList.forEach(r => r.ingredients.forEach(l => { const p = parseIngredient(l); if (p && p.name.length <= 80 && !seen.has(key(p.name))) seen.set(key(p.name), p); }));
+  recipeList.forEach(r => r.ingredients.forEach(l => {
+    const p = parseIngredient(l); if (!p || p.name.length > 80) return;
+    const k = key(p.name), had = seen.get(k);
+    if (had) had.qty = addQty(had.qty, p.qty); else seen.set(k, { ...p });
+  }));
   return [...seen.values()];
 }
 async function addIngredients(list) {
@@ -749,6 +764,19 @@ async function addIngredients(list) {
 function mealPicker(day) {
   if (!editing || editing.kind !== "meal" || editing.id !== day) return null;
   const box = el("div", "editor picker-box"), cur = meals[day], stats = recipeStats();
+  const chosen = cur && cur.recipe && recipeById(cur.recipe);
+  if (chosen) {
+    const card = el("div", "recipe-card");
+    card.appendChild(el("b", null, chosen.name));
+    if (chosen.note) card.appendChild(el("span", "desc", chosen.note));
+    if (chosen.ingredients.length) { const ul = el("ul", "ing-list"); chosen.ingredients.forEach(x => ul.appendChild(el("li", null, x))); card.appendChild(ul); }
+    const row = el("div", "acts"); row.style.justifyContent = "flex-start";
+    const href = safeLink(chosen.link);
+    if (href) { const a = el("a", "btn", "Recept openen ↗"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; row.appendChild(a); }
+    row.appendChild(btn("link", chosen.ingredients.length || chosen.link ? "Recept aanpassen" : "Ingrediënten of link toevoegen", () => { mealQ = ""; openRecipeFromDay(chosen); }));
+    card.appendChild(row); box.appendChild(card);
+    box.appendChild(el("p", "hint", "Iets anders eten? Kies hieronder een ander recept."));
+  }
   const f = el("div", "field mini"); f.innerHTML = SEARCH;
   const inp = el("input"); inp.type = "text"; inp.id = "meal-q"; inp.placeholder = recipes.length ? "Zoek een recept of typ iets anders…" : "Wat eten jullie? bv. Spaghetti bolognese"; inp.value = mealQ; inp.autocomplete = "off"; inp.enterKeyHint = "done";
   inp.setAttribute("aria-label", "Zoek een recept");
@@ -786,9 +814,11 @@ function mealPicker(day) {
   const acts = el("div", "acts"), right = el("div", "acts");
   if (recipes.length > 1 && !q) {
     acts.appendChild(btn("btn", "🎲 Verras me", async () => {
-      const notRecent = [...recipes].sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
+      const near = new Set(Object.entries(meals).filter(([k, m]) => m.recipe && k !== day && Math.abs(dayMs(k) - dayMs(day)) < 7 * 864e5).map(([, m]) => m.recipe));
+      const notRecent = recipes.filter(r => !near.has(r.id)).sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
       const pool = notRecent.slice(0, Math.max(1, Math.ceil(notRecent.length / 2))).filter(r => !cur || r.id !== cur.recipe);
-      const pick = (pool.length ? pool : notRecent)[Math.floor(Math.random() * (pool.length || notRecent.length))];
+      const from = pool.length ? pool : notRecent.length ? notRecent : recipes;
+      const pick = from[Math.floor(Math.random() * from.length)];
       editing = null; await setMeal(day, pick.id, "");
     }));
   } else acts.appendChild(el("span"));
@@ -824,16 +854,29 @@ function recipeEditor(r) {
     try { await updateRecipe(r.id, { name: d.name.trim().slice(0, 80) || r.name, ingredients: lines, link: d.link.trim() ? safeLink(d.link) || d.link.trim() : "", note: d.note.trim() }); } catch (err) { writeFailed(err); }
     editing = null; render();
   }));
-  acts.append(btn("btn ghost-danger", "Verwijderen", async () => { editing = null; await removeRecipe(r); }), right);
-  box.appendChild(acts);
+  if (d.confirmDelete) {
+    const planned = Object.entries(meals).filter(([k, m]) => m.recipe === r.id && k >= dayKey(new Date())).length;
+    const c = el("div", "confirm");
+    c.appendChild(el("span", null, "“" + r.name + "” uit jullie recepten verwijderen?" + (planned ? " Het staat nog " + planned + "× op het menu; die dag" + (planned === 1 ? " wordt" : "en worden") + " dan leeg." : "")));
+    const a = el("div", "acts"); a.style.justifyContent = "flex-end";
+    a.append(btn("btn", "Toch niet", () => { d.confirmDelete = false; render(); }), btn("btn primary danger", "Verwijderen", async () => { editing = null; await removeRecipe(r); }));
+    c.appendChild(a); box.appendChild(c);
+  } else {
+    acts.append(btn("btn ghost-danger", "Verwijderen", () => { d.confirmDelete = true; render(); }), right);
+    box.appendChild(acts);
+  }
   return box;
 }
 function openRecipe(r) {
   if (editing && editing.id === r.id) { editing = null; render(); return; }
   editing = { kind: "recipe", id: r.id, draft: { name: r.name, ingredients: r.ingredients.join("\n"), link: r.link, note: r.note } }; render();
 }
+function openRecipeFromDay(r) {
+  editing = null; recipeQ = ""; openRecipe(r);
+  const li = document.querySelector('[data-recipe="' + r.id + '"]'); if (li) li.scrollIntoView({ block: "center", behavior: "smooth" });
+}
 function recipeRow(r, stats) {
-  const li = el("li", "recipe"), main = el("div", "row-main"), lab = el("div", "label");
+  const li = el("li", "recipe"), main = el("div", "row-main"), lab = el("div", "label"); li.dataset.recipe = r.id;
   lab.appendChild(el("span", "name", r.name));
   if (r.note) lab.appendChild(el("span", "desc", r.note));
   const meta = el("span", "meta"), s = stats[r.id];
@@ -1082,7 +1125,7 @@ function render() {
     return;
   }
   document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false"));
-  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Statistieken" }[tab];
+  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Cijfers" }[tab];
   $("eyebrow").textContent = tab === "list" && current && current.startedAt ? household.name + " · sinds " + fmtDate(current.startedAt) : household.name;
   const open = thisWeek().filter(i => !i.done).length;
   $("badge").hidden = !open; $("badge").textContent = String(open);
