@@ -46,7 +46,9 @@ function boughtShop(i) { if (i.doneShop) return i.doneShop; const a = shopsOf(i)
 let session = null, me = null, household = null, members = [], canWrite = true;
 let items = [], staples = [], weeks = {}, current = null, loaded = false;
 let gifts = [], claims = {}, giftsReady = true; // claims: gift id → user id (never includes your own wishes)
-let tab = store("tab") || "list"; if (!["list", "staples", "gifts", "history", "stats"].includes(tab)) tab = "list";
+let recipes = [], meals = {}, menuReady = true; // meals: "YYYY-MM-DD" → { recipe, note }
+let menuOffset = 0, mealQ = "", recipeQ = "", confirmIngredients = false;
+let tab = store("tab") || "list"; if (!["list", "menu", "staples", "gifts", "history", "stats"].includes(tab)) tab = "list";
 let shopFilter = store("shop") || "all"; if (shopFilter !== "all" && !SHOP_NAME[shopFilter]) shopFilter = "all";
 let giftFor = store("giftFor") || "", giftQ = "";
 let omniQ = "", staplesQ = "", editing = null, confirmFinish = false, whoOpen = false, showAllQuick = false;
@@ -113,7 +115,7 @@ async function loadAll() {
     sb.from("items").select("*").eq("household_id", h).order("created_at").limit(5000),
   ]);
   household = must(hh); members = must(mem); staples = must(st).map(toStaple); items = must(it).map(toItem);
-  await loadGifts();
+  await Promise.all([loadGifts(), loadMenu()]);
   refreshPhotoUrls().catch(() => {});
   weeks = {}; must(wk).forEach(w => { weeks[w.id] = { startedAt: ms(w.started_at), closedAt: ms(w.closed_at) }; });
   current = household.current_week ? { week: household.current_week, startedAt: (weeks[household.current_week] || {}).startedAt } : null;
@@ -155,6 +157,42 @@ async function claimGift(g) {
   } catch (e) { writeFailed(e); scheduleReload(); }
 }
 
+/* Weekmenu: optional too, so the app keeps working until 004_menu.sql is run. */
+const toRecipe = r => ({ id: r.id, name: r.name, ingredients: r.ingredients || [], note: r.note || "", link: r.link || "", at: ms(r.created_at) });
+async function loadMenu() {
+  const h = household.id;
+  const [r, m] = await Promise.all([
+    sb.from("recipes").select("*").eq("household_id", h).order("name"),
+    sb.from("meals").select("day, recipe_id, note").eq("household_id", h).order("day").limit(5000),
+  ]);
+  if (r.error || m.error) { menuReady = false; recipes = []; meals = {}; return; }
+  menuReady = true; recipes = r.data.map(toRecipe);
+  meals = {}; m.data.forEach(x => { meals[x.day] = { recipe: x.recipe_id, note: x.note || "" }; });
+}
+async function addRecipe(name) {
+  if (recipes.some(r => key(r.name) === key(name))) return null;
+  try { const r = toRecipe(must(await sb.from("recipes").insert({ household_id: household.id, name, created_by: me }).select().single())); recipes.push(r); render(); return r; } catch (e) { writeFailed(e); return null; }
+}
+async function updateRecipe(id, patch) {
+  const r = recipes.find(x => x.id === id); if (r) Object.assign(r, patch);
+  must(await sb.from("recipes").update(patch).eq("id", id));
+}
+async function removeRecipe(r) {
+  recipes = recipes.filter(x => x.id !== r.id);
+  Object.values(meals).forEach(m => { if (m.recipe === r.id) m.recipe = null; });
+  render();
+  try { must(await sb.from("recipes").delete().eq("id", r.id)); } catch (e) { writeFailed(e); scheduleReload(); }
+}
+/* Set what we eat on a day: a recipe id, a free text, or nothing (clears the day). */
+async function setMeal(day, recipe, note) {
+  note = (note || "").trim().slice(0, 80);
+  try {
+    if (!recipe && !note) { delete meals[day]; render(); must(await sb.from("meals").delete().eq("household_id", household.id).eq("day", day)); return; }
+    meals[day] = { recipe: recipe || null, note }; render();
+    must(await sb.from("meals").upsert({ household_id: household.id, day, recipe_id: recipe || null, note, updated_by: me, updated_at: new Date().toISOString() }, { onConflict: "household_id,day" }));
+  } catch (e) { writeFailed(e); scheduleReload(); }
+}
+
 let reloadTimer = null;
 function scheduleReload() { clearTimeout(reloadTimer); reloadTimer = setTimeout(async () => { try { await loadAll(); render(); } catch (e) { writeFailed(e); } }, 250); }
 let channel = null;
@@ -167,6 +205,8 @@ function subscribe() {
     .on("postgres_changes", { event: "*", schema: "public", table: "members", filter: f }, scheduleReload)
     .on("postgres_changes", { event: "*", schema: "public", table: "gifts", filter: f }, scheduleReload)
     .on("postgres_changes", { event: "*", schema: "public", table: "gift_claims", filter: f }, scheduleReload)
+    .on("postgres_changes", { event: "*", schema: "public", table: "recipes", filter: f }, scheduleReload)
+    .on("postgres_changes", { event: "*", schema: "public", table: "meals", filter: f }, scheduleReload)
     .on("postgres_changes", { event: "*", schema: "public", table: "households", filter: "id=eq." + household.id }, scheduleReload)
     .subscribe();
 }
@@ -664,6 +704,243 @@ function viewGifts(v) {
   }
 }
 
+/* Weekmenu: per day what we eat, picked from the family's list of favourite recipes. */
+const DAY_SHORT = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"];
+const DAY_LONG = ["Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag", "Zondag"];
+function dayKey(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
+function weekDays(offset) {
+  const t = new Date(); t.setHours(12, 0, 0, 0);
+  const mon = new Date(t); mon.setDate(t.getDate() - ((t.getDay() + 6) % 7) + 7 * offset);
+  return Array.from({ length: 7 }, (_, i) => { const d = new Date(mon); d.setDate(mon.getDate() + i); return d; });
+}
+const recipeById = id => recipes.find(r => r.id === id);
+function mealTitle(m) { if (!m) return ""; const r = m.recipe && recipeById(m.recipe); return r ? r.name : m.note; }
+/* How often and when a recipe was eaten (up to today), so the picker can suggest what you haven't had in a while. */
+function recipeStats() {
+  const today = dayKey(new Date()), s = {};
+  for (const [day, m] of Object.entries(meals)) {
+    if (!m.recipe || day > today) continue;
+    const o = s[m.recipe] = s[m.recipe] || { times: 0, last: "" };
+    o.times++; if (day > o.last) o.last = day;
+  }
+  return s;
+}
+const dayMs = k => new Date(k + "T12:00:00").getTime();
+/* "500 g gehakt" → qty "500 g", name "Gehakt". Lines without an amount are kept whole. */
+function parseIngredient(line) {
+  const t = String(line || "").trim().replace(/^[-•*]\s*/, ""); if (!t) return null;
+  const m = t.match(/^(\d+(?:[.,/]\d+)?\s*(?:kg|g|gr|gram|l|liter|dl|cl|ml|el|tl|st|stuks?|blikjes?|blik|potjes?|pot|pakjes?|pak|zakjes?|zak|bosjes?|bos|teentjes?|plakjes?|x)?\.?)\s+(.+)$/i);
+  const name = (m ? m[2] : t).trim(), qty = m ? m[1].replace(/\.$/, "").trim() : "";
+  return { name: name.charAt(0).toUpperCase() + name.slice(1), qty: qty.slice(0, 12) };
+}
+function ingredientsOf(recipeList) {
+  const seen = new Map();
+  recipeList.forEach(r => r.ingredients.forEach(l => { const p = parseIngredient(l); if (p && p.name.length <= 80 && !seen.has(key(p.name))) seen.set(key(p.name), p); }));
+  return [...seen.values()];
+}
+async function addIngredients(list) {
+  for (const p of list) {
+    if (onListByName(p.name)) continue;
+    const k = known().get(key(p.name));
+    await addItem(k ? { name: k.name, qty: p.qty, cat: k.cat, shops: k.shops } : { name: p.name, qty: p.qty });
+  }
+}
+
+function mealPicker(day) {
+  if (!editing || editing.kind !== "meal" || editing.id !== day) return null;
+  const box = el("div", "editor picker-box"), cur = meals[day], stats = recipeStats();
+  const f = el("div", "field mini"); f.innerHTML = SEARCH;
+  const inp = el("input"); inp.type = "text"; inp.id = "meal-q"; inp.placeholder = recipes.length ? "Zoek een recept of typ iets anders…" : "Wat eten jullie? bv. Spaghetti bolognese"; inp.value = mealQ; inp.autocomplete = "off"; inp.enterKeyHint = "done";
+  inp.setAttribute("aria-label", "Zoek een recept");
+  const q = mealQ.trim(), t = key(q);
+  const hits = recipes.filter(r => !t || key(r.name).includes(t))
+    .sort((a, b) => t ? (key(a.name).startsWith(t) ? 0 : 1) - (key(b.name).startsWith(t) ? 0 : 1) || a.name.localeCompare(b.name)
+      : ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || "") || a.name.localeCompare(b.name));
+  inp.addEventListener("input", () => { mealQ = inp.value; render(); });
+  inp.addEventListener("keydown", async e => {
+    if (e.key === "Escape") { editing = null; mealQ = ""; render(); }
+    if (e.key !== "Enter") return; e.preventDefault();
+    const exact = recipes.find(r => key(r.name) === t);
+    if (exact || (q && hits.length === 1)) { editing = null; mealQ = ""; await setMeal(day, (exact || hits[0]).id, ""); }
+    else if (q) { editing = null; mealQ = ""; await setMeal(day, null, q); }
+  });
+  f.appendChild(inp); box.appendChild(f);
+
+  const res = el("div", "results flat pick-list");
+  hits.forEach(r => {
+    const s = stats[r.id], chosen = cur && cur.recipe === r.id;
+    const row = btn("res" + (chosen ? " onlist" : ""), null, async () => { editing = null; mealQ = ""; await setMeal(day, r.id, ""); });
+    const lab = el("span", "label"); lab.appendChild(el("span", "name", r.name));
+    lab.appendChild(el("span", "meta", s ? s.times + "× gegeten · laatst " + fmtDate(dayMs(s.last)) : "Nog niet op het menu gezet"));
+    row.append(lab, el("span", "plus", chosen ? "✓" : "+")); row.disabled = !writable(); res.appendChild(row);
+  });
+  if (q && !recipes.some(r => key(r.name) === t)) {
+    res.appendChild(newRow("“" + q + "” als recept bewaren", "Komt in jullie receptenlijst en staat meteen op " + DAY_LONG[(new Date(day + "T12:00:00").getDay() + 6) % 7].toLowerCase(), async () => {
+      const name = q; editing = null; mealQ = ""; const r = await addRecipe(name); if (r) await setMeal(day, r.id, "");
+    }));
+    res.appendChild(newRow("“" + q + "” enkel voor deze dag", "Zonder recept, bv. restjes of uit eten", async () => { const n = q; editing = null; mealQ = ""; await setMeal(day, null, n); }));
+  }
+  if (res.childNodes.length) box.appendChild(res);
+  else if (!recipes.length) box.appendChild(el("p", "hint", "Nog geen recepten. Typ hierboven een gerecht, dan bewaren we het meteen in jullie lijst."));
+
+  const acts = el("div", "acts"), right = el("div", "acts");
+  if (recipes.length > 1 && !q) {
+    acts.appendChild(btn("btn", "🎲 Verras me", async () => {
+      const notRecent = [...recipes].sort((a, b) => ((stats[a.id] || {}).last || "").localeCompare((stats[b.id] || {}).last || ""));
+      const pool = notRecent.slice(0, Math.max(1, Math.ceil(notRecent.length / 2))).filter(r => !cur || r.id !== cur.recipe);
+      const pick = (pool.length ? pool : notRecent)[Math.floor(Math.random() * (pool.length || notRecent.length))];
+      editing = null; await setMeal(day, pick.id, "");
+    }));
+  } else acts.appendChild(el("span"));
+  if (cur) right.appendChild(btn("btn ghost-danger", "Leegmaken", async () => { editing = null; mealQ = ""; await setMeal(day, null, ""); }));
+  right.appendChild(btn("btn", "Sluiten", () => { editing = null; mealQ = ""; render(); }));
+  acts.appendChild(right); box.appendChild(acts);
+  return box;
+}
+
+function recipeEditor(r) {
+  if (!editing || editing.kind !== "recipe" || editing.id !== r.id) return null;
+  const d = editing.draft, box = el("div", "editor");
+  const nm = el("input", "txt"); nm.id = "ed-rname"; nm.value = d.name; nm.maxLength = 80; nm.addEventListener("input", () => { d.name = nm.value; });
+  box.appendChild(field("Naam", nm));
+  const ing = el("textarea", "txt"); ing.id = "ed-ring"; ing.rows = 5; ing.value = d.ingredients; ing.placeholder = "Eén per regel, bv.\n500 g gehakt\n1 ui\nSpaghetti\nTomatensaus";
+  ing.addEventListener("input", () => { d.ingredients = ing.value; });
+  box.appendChild(field("Ingrediënten (optioneel)", ing));
+  const ln = el("input", "txt"); ln.id = "ed-rlink"; ln.type = "url"; ln.inputMode = "url"; ln.value = d.link; ln.maxLength = 1000; ln.placeholder = "https://… (bv. Dagelijkse Kost)"; ln.addEventListener("input", () => { d.link = ln.value; });
+  box.appendChild(field("Link naar het recept (optioneel)", ln));
+  const n = el("textarea", "txt"); n.id = "ed-rnote"; n.rows = 2; n.maxLength = 1000; n.value = d.note; n.placeholder = "bv. dubbele portie maken, Mil zonder ui";
+  n.addEventListener("input", () => { d.note = n.value; });
+  box.appendChild(field("Uitleg (optioneel)", n));
+  const ingList = ingredientsOf([r]);
+  if (ingList.length) {
+    const missing = ingList.filter(p => !onListByName(p.name));
+    const b = btn("btn", missing.length ? "🛒 " + missing.length + " ingrediënt" + (missing.length === 1 ? "" : "en") + " op de boodschappenlijst" : "✓ Alles staat al op de lijst", async e => { e.currentTarget.disabled = true; await addIngredients(missing); render(); });
+    b.disabled = !missing.length || !writable(); b.style.alignSelf = "flex-start"; box.appendChild(b);
+  }
+  const acts = el("div", "acts"), right = el("div", "acts");
+  right.append(btn("btn", "Annuleren", () => { editing = null; render(); }), btn("btn primary", "Bewaren", async e => {
+    e.currentTarget.disabled = true;
+    const lines = d.ingredients.split("\n").map(x => x.trim()).filter(Boolean).slice(0, 60).map(x => x.slice(0, 120));
+    try { await updateRecipe(r.id, { name: d.name.trim().slice(0, 80) || r.name, ingredients: lines, link: d.link.trim() ? safeLink(d.link) || d.link.trim() : "", note: d.note.trim() }); } catch (err) { writeFailed(err); }
+    editing = null; render();
+  }));
+  acts.append(btn("btn ghost-danger", "Verwijderen", async () => { editing = null; await removeRecipe(r); }), right);
+  box.appendChild(acts);
+  return box;
+}
+function openRecipe(r) {
+  if (editing && editing.id === r.id) { editing = null; render(); return; }
+  editing = { kind: "recipe", id: r.id, draft: { name: r.name, ingredients: r.ingredients.join("\n"), link: r.link, note: r.note } }; render();
+}
+function recipeRow(r, stats) {
+  const li = el("li", "recipe"), main = el("div", "row-main"), lab = el("div", "label");
+  lab.appendChild(el("span", "name", r.name));
+  if (r.note) lab.appendChild(el("span", "desc", r.note));
+  const meta = el("span", "meta"), s = stats[r.id];
+  const bits = []; if (r.ingredients.length) bits.push(r.ingredients.length + " ingrediënt" + (r.ingredients.length === 1 ? "" : "en"));
+  bits.push(s ? s.times + "× gegeten · laatst " + fmtDate(dayMs(s.last)) : "Nog niet gegeten");
+  meta.appendChild(el("span", null, bits.join(" · ")));
+  const href = safeLink(r.link);
+  if (href) { const a = el("a", "glink", linkHost(href) + " ↗"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; meta.appendChild(a); }
+  lab.appendChild(meta); main.appendChild(lab);
+  const more = btn("more", "⋯", () => openRecipe(r), "Bewerk " + r.name); more.disabled = !writable();
+  more.setAttribute("aria-expanded", editing && editing.id === r.id ? "true" : "false"); main.appendChild(more);
+  li.appendChild(main);
+  const ed = recipeEditor(r); if (ed) li.appendChild(ed);
+  return li;
+}
+
+function viewMenu(v) {
+  if (!menuReady) {
+    const e = el("div", "empty"); e.appendChild(el("b", null, "Het weekmenu is nog niet geactiveerd"));
+    e.appendChild(el("span", null, "Voer eenmalig supabase/004_menu.sql uit in de Supabase SQL Editor. Daarna kun je hier recepten bewaren en per dag kiezen wat jullie eten."));
+    v.appendChild(e); return;
+  }
+  const days = weekDays(menuOffset), today = dayKey(new Date()), stats = recipeStats();
+  const nav = el("div", "weeknav");
+  const prev = btn("navbtn", "‹", () => { menuOffset--; editing = null; confirmIngredients = false; render(); }, "Vorige week");
+  const next = btn("navbtn", "›", () => { menuOffset++; editing = null; confirmIngredients = false; render(); }, "Volgende week");
+  const mid = el("div", "navmid");
+  mid.appendChild(el("b", null, { "-1": "Vorige week", "0": "Deze week", "1": "Volgende week" }[menuOffset] || "Week van " + fmtDate(days[0])));
+  const range = el("span", null, fmtDate(days[0]) + " – " + fmtDate(days[6]));
+  mid.appendChild(range);
+  if (menuOffset) mid.appendChild(btn("link", "Naar deze week", () => { menuOffset = 0; editing = null; render(); }));
+  nav.append(prev, mid, next); v.appendChild(nav);
+
+  const ul = el("ul", "rows days");
+  days.forEach((d, i) => {
+    const k = dayKey(d), m = meals[k], title = mealTitle(m), r = m && m.recipe && recipeById(m.recipe);
+    const li = el("li", "day" + (k === today ? " today" : "") + (k < today ? " past" : ""));
+    const main = el("div", "row-main");
+    const b = btn("check dayrow", null, () => {
+      if (editing && editing.kind === "meal" && editing.id === k) { editing = null; mealQ = ""; } else { editing = { kind: "meal", id: k }; mealQ = ""; }
+      render(); const q = $("meal-q"); if (q && !("ontouchstart" in window)) q.focus();
+    });
+    b.disabled = !writable(); b.setAttribute("aria-expanded", editing && editing.id === k ? "true" : "false");
+    b.setAttribute("aria-label", DAY_LONG[i] + " " + fmtDate(d) + ": " + (title || "nog niets gekozen"));
+    const cal = el("span", "cal"); cal.append(el("span", "dn", DAY_SHORT[i]), el("span", "dd", String(d.getDate())));
+    const lab = el("span", "label");
+    lab.appendChild(el("span", "name" + (title ? "" : " none"), title || (k < today ? "–" : "Kies wat we eten")));
+    const meta = el("span", "meta");
+    if (k === today) meta.appendChild(el("span", "tag", "Vandaag"));
+    if (r && r.ingredients.length) meta.appendChild(el("span", null, r.ingredients.length + " ingrediënt" + (r.ingredients.length === 1 ? "" : "en")));
+    if (m && !m.recipe && m.note) meta.appendChild(el("span", null, "Zonder recept"));
+    if (meta.childNodes.length) lab.appendChild(meta);
+    b.append(cal, lab); main.appendChild(b);
+    li.appendChild(main);
+    const p = mealPicker(k); if (p) li.appendChild(p);
+    ul.appendChild(li);
+  });
+  v.appendChild(ul);
+
+  // Ingredients of what's still coming this week → shopping list.
+  const upcoming = days.map(dayKey).filter(k => k >= today).map(k => meals[k] && meals[k].recipe && recipeById(meals[k].recipe)).filter(Boolean);
+  if (upcoming.length && writable()) {
+    const ing = ingredientsOf(upcoming), missing = ing.filter(p => !onListByName(p.name));
+    const foot = el("div", "weekfoot");
+    if (!ing.length) foot.appendChild(el("span", null, "Tip: zet bij een recept de ingrediënten, dan zet je ze met één tik op de boodschappenlijst."));
+    else if (!missing.length) foot.appendChild(el("span", null, "✓ Alle ingrediënten van " + (menuOffset ? "die" : "deze") + " week staan op de boodschappenlijst."));
+    else {
+      foot.appendChild(el("span", null, missing.length + " ingrediënt" + (missing.length === 1 ? "" : "en") + " nog niet op de boodschappenlijst."));
+      foot.appendChild(btn("btn", "🛒 Op de lijst zetten", () => { confirmIngredients = !confirmIngredients; render(); }));
+    }
+    v.appendChild(foot);
+    if (confirmIngredients && missing.length) {
+      const c = el("div", "confirm");
+      c.appendChild(el("span", null, "Deze komen op de boodschappenlijst van deze week. Wat je al in huis hebt, haal je er daarna gewoon af."));
+      const chips = el("div", "quick-chips"); missing.forEach(p => chips.appendChild(el("span", "ingchip", p.name + (p.qty ? " · " + p.qty : "")))); c.appendChild(chips);
+      const a = el("div", "acts"); a.style.justifyContent = "flex-end";
+      a.append(btn("btn", "Annuleren", () => { confirmIngredients = false; render(); }), btn("btn primary", "Toevoegen", async e => { e.currentTarget.disabled = true; await addIngredients(missing); confirmIngredients = false; showStatus(missing.length + " ingrediënten staan op de lijst van Deze week."); setTimeout(() => showStatus(""), 4000); render(); }));
+      c.appendChild(a); v.appendChild(c);
+    }
+  }
+
+  // The family's favourite recipes.
+  const sec = el("section", "section");
+  const h = el("h2", null, "Onze recepten"); if (recipes.length) h.appendChild(el("span", null, String(recipes.length))); sec.appendChild(h);
+  const rq = recipeQ.trim(), rt = key(rq);
+  const om = omni("Zoek of voeg een recept toe…", recipeQ, val => { recipeQ = val; render(); }, async val => {
+    const n = val.trim(); if (!n) return; recipeQ = "";
+    const ex = recipes.find(r => key(r.name) === key(n));
+    if (ex) { openRecipe(ex); return; }
+    const r = await addRecipe(n); if (r) openRecipe(r);
+  });
+  om.classList.add("static"); sec.appendChild(om);
+  const list = recipes.filter(r => !rt || key(r.name).includes(rt)).sort((a, b) => a.name.localeCompare(b.name));
+  if (rq && !recipes.some(r => key(r.name) === rt)) {
+    const res = el("div", "results flat"); res.appendChild(newRow("“" + rq + "” als recept bewaren", "Daarna kun je ingrediënten en een link toevoegen", async () => { const n = rq; recipeQ = ""; const r = await addRecipe(n); if (r) openRecipe(r); }));
+    sec.appendChild(res);
+  }
+  if (list.length) { const ul2 = el("ul", "rows"); list.forEach(r => ul2.appendChild(recipeRow(r, stats))); sec.appendChild(ul2); }
+  else if (!rq) {
+    const e = el("div", "empty"); e.appendChild(el("b", null, "Nog geen recepten"));
+    e.appendChild(el("span", null, "Typ hierboven wat jullie graag eten, bv. Spaghetti bolognese of Stoofvlees met frietjes. Tik daarna op een dag om te kiezen."));
+    sec.appendChild(e);
+  }
+  if (recipes.length) sec.appendChild(el("p", "hint", "Met ⋯ voeg je ingrediënten, een link of uitleg toe."));
+  v.appendChild(sec);
+}
+
 function bars(rows) {
   const ul = el("ul", "bars"); const max = Math.max(1, ...rows.map(r => r[1]));
   rows.forEach(([label, n, c]) => {
@@ -791,7 +1068,7 @@ function drawWho() {
 }
 $("me-btn").addEventListener("click", () => { whoOpen = !whoOpen; drawWho(); });
 
-function setTab(t) { tab = t; store("tab", t); editing = null; confirmFinish = false; render(); window.scrollTo(0, 0); }
+function setTab(t) { tab = t; store("tab", t); editing = null; confirmFinish = false; confirmIngredients = false; mealQ = ""; render(); window.scrollTo(0, 0); }
 document.querySelectorAll("nav.tabbar button").forEach(b => b.addEventListener("click", () => setTab(b.dataset.tab)));
 
 function render() {
@@ -805,13 +1082,13 @@ function render() {
     return;
   }
   document.querySelectorAll("nav.tabbar button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false"));
-  $("title").textContent = { list: "Deze week", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Statistieken" }[tab];
+  $("title").textContent = { list: "Deze week", menu: "Weekmenu", staples: "Vaste items", gifts: "Cadeaus", history: "Historiek", stats: "Statistieken" }[tab];
   $("eyebrow").textContent = tab === "list" && current && current.startedAt ? household.name + " · sinds " + fmtDate(current.startedAt) : household.name;
   const open = thisWeek().filter(i => !i.done).length;
   $("badge").hidden = !open; $("badge").textContent = String(open);
   const act = document.activeElement, keepId = act && act.id, sel = act && typeof act.selectionStart === "number" ? act.selectionStart : null;
   v.textContent = "";
-  ({ list: viewList, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats })[tab](v);
+  ({ list: viewList, menu: viewMenu, staples: viewStaples, gifts: viewGifts, history: viewHistory, stats: viewStats })[tab](v);
   if (keepId && $(keepId) && $(keepId) !== act) { const n = $(keepId); n.focus(); if (sel != null && n.setSelectionRange) { const p = Math.min(sel, n.value.length); n.setSelectionRange(p, p); } }
 }
 

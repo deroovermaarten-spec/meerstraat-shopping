@@ -172,9 +172,10 @@ details.week li.missed .name { color: var(--muted); }
 /* Bottom tab bar */
 nav.tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 8; background: color-mix(in srgb, var(--surface) 82%, transparent); -webkit-backdrop-filter: saturate(1.6) blur(14px); backdrop-filter: saturate(1.6) blur(14px); border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom, 0px); padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px); }
-nav.tabbar .in { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); }
+nav.tabbar .in { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(6, 1fr); }
 nav.tabbar button { border: 0; background: none; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 2px 10px; cursor: pointer; font-size: .72rem; font-weight: 500; color: var(--muted); position: relative; }
 nav.tabbar svg { width: 22px; height: 22px; }
+nav.tabbar button { white-space: nowrap; font-size: .68rem; letter-spacing: -0.01em; min-width: 0; }
 nav.tabbar button[aria-selected="true"] { color: var(--accent); font-weight: 700; }
 nav.tabbar .badge { position: absolute; top: 4px; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: .68rem; font-weight: 700; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
 
@@ -218,3 +219,31 @@ li.gift .glink:hover { text-decoration: underline; }
 li.gift .who-buys { color: var(--accent); font-weight: 600; }
 li.gift .btn.claim { flex: none; margin-right: 10px; white-space: nowrap; font-size: .82rem; padding: 7px 11px; }
 li.gift.claimed .name { color: var(--muted); }
+
+/* Weekmenu */
+.weeknav { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 6px; box-shadow: var(--shadow); }
+.navbtn { flex: none; width: 44px; height: 44px; border: 0; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 1.5rem; line-height: 1; cursor: pointer; }
+.navmid { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 1px; text-align: center; }
+.navmid b { font-family: var(--display); font-size: 1.05rem; }
+.navmid > span { font-size: .8rem; color: var(--muted); }
+.navmid .link { padding: 0; font-size: .78rem; }
+.dayrow { gap: 14px; }
+.cal { flex: none; width: 44px; height: 46px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.05; }
+.cal .dn { font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.cal .dd { font-family: var(--display); font-weight: 800; font-size: 1.15rem; color: var(--fg); }
+li.day.today .cal { background: var(--accent); border-color: var(--accent); }
+li.day.today .cal .dn, li.day.today .cal .dd { color: var(--accent-ink); }
+li.day .name { font-weight: 600; }
+li.day .name.none { font-weight: 400; color: var(--muted); }
+li.day.past .label, li.day.past .cal { opacity: .6; }
+li.day .tag { color: var(--accent); font-weight: 700; }
+.dayrow[aria-expanded="true"] .name.none { color: var(--accent); }
+.picker-box .field.mini { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 12px; padding: 2px 10px; }
+.picker-box .field.mini:focus-within { border-color: var(--accent); }
+.picker-box .field.mini svg { flex: none; width: 16px; height: 16px; color: var(--muted); }
+.picker-box .field.mini input { flex: 1; min-width: 0; border: 0; background: none; font: inherit; font-size: 16px; color: var(--fg); padding: 9px 0; outline: none; }
+.pick-list { max-height: 320px; overflow-y: auto; }
+.omni.static { position: static; margin: 0; padding: 0; }
+.ingchip { font-size: .85rem; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 4px 10px; }
+li.recipe .label { padding: 12px 0 12px 14px; }
+li.recipe .glink { color: var(--accent); font-weight: 600; text-decoration: none; }
